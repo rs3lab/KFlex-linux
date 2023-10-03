@@ -303,6 +303,9 @@ struct bpf_map {
 	bool free_after_rcu_gp;
 	atomic64_t sleepable_refcnt;
 	s64 __percpu *elem_count;
+	u64 kernel_base_addr;
+	u64 kernel_addr_mask;
+	u64 user_base_addr;
 };
 
 static inline const char *btf_field_type_name(enum btf_field_type type)

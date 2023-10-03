@@ -1010,6 +1010,7 @@ enum bpf_map_type {
 	BPF_MAP_TYPE_USER_RINGBUF,
 	BPF_MAP_TYPE_CGRP_STORAGE,
 	BPF_MAP_TYPE_ARENA,
+	BPF_MAP_TYPE_HEAP,
 	__MAX_BPF_MAP_TYPE
 };
 
@@ -1408,6 +1409,9 @@ enum {
 
 /* Do not translate kernel bpf_arena pointers to user pointers */
 	BPF_F_NO_USER_CONV	= (1U << 18),
+
+/* Translate heap pointers to user pointers, and vice versa */
+	BPF_F_HEAP_TRANS	= (1U << 19),
 };
 
 /* Flags for BPF_PROG_QUERY. */
