@@ -3625,7 +3625,11 @@ BPF_CALL_4(sk_skb_adjust_room, struct sk_buff *, skb, s32, len_diff,
 			return -ENOMEM;
 		__skb_pull(skb, len_diff_abs);
 	}
-	if (tls_sw_has_ctx_rx(skb->sk)) {
+	/* BUG: We must update strp_msg full_len when it is changed by verdict
+	 * program, without this the packet gets dropped when we try to generate
+	 * a reply from the strparser layer.
+	 */
+	if (tls_sw_has_ctx_rx(skb->sk) || true) {
 		struct strp_msg *rxm = strp_msg(skb);
 
 		rxm->full_len += len_diff;
