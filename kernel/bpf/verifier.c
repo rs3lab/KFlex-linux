@@ -11392,6 +11392,7 @@ enum special_kfunc_type {
 	KF_bpf_percpu_obj_drop_impl,
 	KF_bpf_throw,
 	KF_bpf_iter_css_task_new,
+	KF_bpf_rdonly_obj_cast,
 };
 
 BTF_SET_START(special_kfunc_set)
@@ -11418,6 +11419,7 @@ BTF_ID(func, bpf_throw)
 #ifdef CONFIG_CGROUPS
 BTF_ID(func, bpf_iter_css_task_new)
 #endif
+BTF_ID(func, bpf_rdonly_obj_cast)
 BTF_SET_END(special_kfunc_set)
 
 BTF_ID_LIST(special_kfunc_list)
@@ -11448,6 +11450,7 @@ BTF_ID(func, bpf_iter_css_task_new)
 #else
 BTF_ID_UNUSED
 #endif
+BTF_ID(func, bpf_rdonly_obj_cast)
 
 static bool is_kfunc_ret_null(struct bpf_kfunc_call_arg_meta *meta)
 {
@@ -12777,6 +12780,24 @@ static int check_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 				mark_reg_known_zero(env, regs, BPF_REG_0);
 				regs[BPF_REG_0].type = PTR_TO_BTF_ID | PTR_UNTRUSTED;
 				regs[BPF_REG_0].btf = desc_btf;
+				regs[BPF_REG_0].btf_id = meta.arg_constant.value;
+			} else if (meta.func_id == special_kfunc_list[KF_bpf_rdonly_obj_cast]) {
+				struct btf *ret_btf = env->prog->aux->btf;
+				if (!ret_btf) {
+					verbose(env, "bpf_rdonly_obj_cast requires prog BTF\n");
+					return -EINVAL;
+				}
+
+				ret_t = btf_type_by_id(ret_btf, meta.arg_constant.value);
+				if (!ret_t || !btf_type_is_struct(ret_t)) {
+					verbose(env,
+						"kfunc bpf_rdonly_obj_cast type ID argument must be of a struct\n");
+					return -EINVAL;
+				}
+
+				mark_reg_known_zero(env, regs, BPF_REG_0);
+				regs[BPF_REG_0].type = PTR_TO_BTF_ID | PTR_UNTRUSTED;
+				regs[BPF_REG_0].btf = ret_btf;
 				regs[BPF_REG_0].btf_id = meta.arg_constant.value;
 			} else if (meta.func_id == special_kfunc_list[KF_bpf_dynptr_slice] ||
 				   meta.func_id == special_kfunc_list[KF_bpf_dynptr_slice_rdwr]) {
@@ -20126,7 +20147,8 @@ static int fixup_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 		__fixup_collection_insert_kfunc(&env->insn_aux_data[insn_idx], struct_meta_reg,
 						node_offset_reg, insn, insn_buf, cnt);
 	} else if (desc->func_id == special_kfunc_list[KF_bpf_cast_to_kern_ctx] ||
-		   desc->func_id == special_kfunc_list[KF_bpf_rdonly_cast]) {
+		   desc->func_id == special_kfunc_list[KF_bpf_rdonly_cast] ||
+		   desc->func_id == special_kfunc_list[KF_bpf_rdonly_obj_cast]) {
 		insn_buf[0] = BPF_MOV64_REG(BPF_REG_0, BPF_REG_1);
 		*cnt = 1;
 	}
