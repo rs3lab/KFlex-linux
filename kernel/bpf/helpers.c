@@ -2655,6 +2655,11 @@ __bpf_kfunc void *bpf_rdonly_obj_cast(void *obj__ign, u32 btf_id__k)
 	return obj__ign;
 }
 
+__bpf_kfunc u64 bpf_scalar_cast(u64 any__ign)
+{
+	return any__ign;
+}
+
 __bpf_kfunc_end_defs();
 
 BTF_KFUNCS_START(generic_btf_ids)
@@ -2687,6 +2692,7 @@ BTF_ID_FLAGS(func, bpf_task_get_cgroup1, KF_ACQUIRE | KF_RCU | KF_RET_NULL)
 BTF_ID_FLAGS(func, bpf_task_from_pid, KF_ACQUIRE | KF_RET_NULL)
 BTF_ID_FLAGS(func, bpf_throw)
 BTF_ID_FLAGS(func, bpf_rdonly_obj_cast)
+BTF_ID_FLAGS(func, bpf_scalar_cast)
 BTF_KFUNCS_END(generic_btf_ids)
 
 static const struct btf_kfunc_id_set generic_kfunc_set = {

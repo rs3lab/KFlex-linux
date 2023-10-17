@@ -11393,6 +11393,7 @@ enum special_kfunc_type {
 	KF_bpf_throw,
 	KF_bpf_iter_css_task_new,
 	KF_bpf_rdonly_obj_cast,
+	KF_bpf_scalar_cast,
 };
 
 BTF_SET_START(special_kfunc_set)
@@ -11420,6 +11421,7 @@ BTF_ID(func, bpf_throw)
 BTF_ID(func, bpf_iter_css_task_new)
 #endif
 BTF_ID(func, bpf_rdonly_obj_cast)
+BTF_ID(func, bpf_scalar_cast)
 BTF_SET_END(special_kfunc_set)
 
 BTF_ID_LIST(special_kfunc_list)
@@ -11451,6 +11453,7 @@ BTF_ID(func, bpf_iter_css_task_new)
 BTF_ID_UNUSED
 #endif
 BTF_ID(func, bpf_rdonly_obj_cast)
+BTF_ID(func, bpf_scalar_cast)
 
 static bool is_kfunc_ret_null(struct bpf_kfunc_call_arg_meta *meta)
 {
@@ -12799,6 +12802,8 @@ static int check_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 				regs[BPF_REG_0].type = PTR_TO_BTF_ID | PTR_UNTRUSTED;
 				regs[BPF_REG_0].btf = ret_btf;
 				regs[BPF_REG_0].btf_id = meta.arg_constant.value;
+			} else if (meta.func_id == special_kfunc_list[KF_bpf_scalar_cast]) {
+				mark_reg_unknown(env, regs, BPF_REG_0);
 			} else if (meta.func_id == special_kfunc_list[KF_bpf_dynptr_slice] ||
 				   meta.func_id == special_kfunc_list[KF_bpf_dynptr_slice_rdwr]) {
 				enum bpf_type_flag type_flag = get_dynptr_type_flag(meta.initialized_dynptr.type);
@@ -20148,7 +20153,8 @@ static int fixup_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 						node_offset_reg, insn, insn_buf, cnt);
 	} else if (desc->func_id == special_kfunc_list[KF_bpf_cast_to_kern_ctx] ||
 		   desc->func_id == special_kfunc_list[KF_bpf_rdonly_cast] ||
-		   desc->func_id == special_kfunc_list[KF_bpf_rdonly_obj_cast]) {
+		   desc->func_id == special_kfunc_list[KF_bpf_rdonly_obj_cast] ||
+		   desc->func_id == special_kfunc_list[KF_bpf_scalar_cast]) {
 		insn_buf[0] = BPF_MOV64_REG(BPF_REG_0, BPF_REG_1);
 		*cnt = 1;
 	}
