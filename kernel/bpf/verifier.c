@@ -11394,6 +11394,7 @@ enum special_kfunc_type {
 	KF_bpf_iter_css_task_new,
 	KF_bpf_rdonly_obj_cast,
 	KF_bpf_scalar_cast,
+	KF_bpf_iter_num_next,
 };
 
 BTF_SET_START(special_kfunc_set)
@@ -11454,6 +11455,7 @@ BTF_ID_UNUSED
 #endif
 BTF_ID(func, bpf_rdonly_obj_cast)
 BTF_ID(func, bpf_scalar_cast)
+BTF_ID(func, bpf_iter_num_next)
 
 static bool is_kfunc_ret_null(struct bpf_kfunc_call_arg_meta *meta)
 {
@@ -20157,6 +20159,30 @@ static int fixup_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 		   desc->func_id == special_kfunc_list[KF_bpf_scalar_cast]) {
 		insn_buf[0] = BPF_MOV64_REG(BPF_REG_0, BPF_REG_1);
 		*cnt = 1;
+	} else if (desc->func_id == special_kfunc_list[KF_bpf_iter_num_next]) {
+		// r0 = s->cur
+		insn_buf[0] = BPF_LDX_MEM(BPF_W, BPF_REG_0, BPF_REG_1, 0);
+		// r2 = s->end
+		insn_buf[1] = BPF_LDX_MEMSX(BPF_W, BPF_REG_2, BPF_REG_1, 4);
+		// r0 += 1
+		insn_buf[2] = BPF_ALU32_IMM(BPF_ADD, BPF_REG_0, 1);
+		// (s64)r0 = (s32)r0
+		insn_buf[3] = BPF_MOVSX64_REG(BPF_REG_0, BPF_REG_0, 32);
+		// if (r0 < r2) goto next;
+		insn_buf[4] = BPF_JMP_REG(BPF_JSLT, BPF_REG_0, BPF_REG_2, 3);
+		// s->cur = 0, s->end = 0
+		insn_buf[5] = BPF_ST_MEM(BPF_DW, BPF_REG_1, 0, 0);
+		// r0 = NULL
+		insn_buf[6] = BPF_MOV64_IMM(BPF_REG_0, 0);
+		// goto end
+		insn_buf[7] = BPF_JMP_IMM(BPF_JA, 0, 0, 2),
+		// next:
+		// s->cur = r0
+		insn_buf[8] = BPF_STX_MEM(BPF_W, BPF_REG_1, BPF_REG_0, 0);
+		// r0 = s
+		insn_buf[9] = BPF_MOV64_REG(BPF_REG_0, BPF_REG_1);
+		// end
+		*cnt = 10;
 	}
 	return 0;
 }
