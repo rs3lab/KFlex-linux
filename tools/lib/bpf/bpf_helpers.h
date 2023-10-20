@@ -183,6 +183,7 @@ enum libbpf_tristate {
 #define __kptr_untrusted __attribute__((btf_type_tag("kptr_untrusted")))
 #define __kptr __attribute__((btf_type_tag("kptr")))
 #define __percpu_kptr __attribute__((btf_type_tag("percpu_kptr")))
+#define __hptr(heap) __attribute__((btf_type_tag("hptr:" #heap)))
 
 #define bpf_ksym_exists(sym) ({									\
 	_Static_assert(!__builtin_constant_p(!!sym), #sym " should be marked as __weak");	\
