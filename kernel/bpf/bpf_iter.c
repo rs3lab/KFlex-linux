@@ -841,4 +841,54 @@ __bpf_kfunc void bpf_iter_num_destroy(struct bpf_iter_num *it)
 	s->cur = s->end = 0;
 }
 
+struct bpf_iter_loop_kern {
+	int cur;
+	int end;
+} __aligned(8);
+
+__bpf_kfunc_start_defs();
+
+__bpf_kfunc int bpf_iter_loop_new(struct bpf_iter_loop *it)
+{
+	struct bpf_iter_loop_kern *s = (void *)it;
+
+	BUILD_BUG_ON(sizeof(struct bpf_iter_num_kern) != sizeof(struct bpf_iter_num));
+	BUILD_BUG_ON(__alignof__(struct bpf_iter_num_kern) != __alignof__(struct bpf_iter_num));
+
+	/* user will call bpf_iter_num_next() first,
+	 * which will set s->cur to exactly start value;
+	 * underflow shouldn't matter
+	 */
+	s->cur = -1;
+	s->end = BPF_MAX_LOOPS;
+
+	return 0;
+}
+
+__bpf_kfunc int *bpf_iter_loop_next(struct bpf_iter_loop* it)
+{
+	struct bpf_iter_loop_kern *s = (void *)it;
+
+	/* check failed initialization or if we are done (same behavior);
+	 * need to be careful about overflow, so convert to s64 for checks,
+	 * e.g., if s->cur == s->end == INT_MAX, we can't just do
+	 * s->cur + 1 >= s->end
+	 */
+	if ((s64)(s->cur + 1) >= s->end) {
+		s->cur = s->end = 0;
+		return NULL;
+	}
+
+	s->cur++;
+
+	return &s->cur;
+}
+
+__bpf_kfunc void bpf_iter_loop_destroy(struct bpf_iter_loop *it)
+{
+	struct bpf_iter_loop_kern *s = (void *)it;
+
+	s->cur = s->end = 0;
+}
+
 __bpf_kfunc_end_defs();

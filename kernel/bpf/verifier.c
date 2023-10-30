@@ -11395,6 +11395,9 @@ enum special_kfunc_type {
 	KF_bpf_rdonly_obj_cast,
 	KF_bpf_scalar_cast,
 	KF_bpf_iter_num_next,
+	KF_bpf_iter_loop_new,
+	KF_bpf_iter_loop_next,
+	KF_bpf_iter_loop_destroy,
 };
 
 BTF_SET_START(special_kfunc_set)
@@ -11456,6 +11459,9 @@ BTF_ID_UNUSED
 BTF_ID(func, bpf_rdonly_obj_cast)
 BTF_ID(func, bpf_scalar_cast)
 BTF_ID(func, bpf_iter_num_next)
+BTF_ID(func, bpf_iter_loop_new)
+BTF_ID(func, bpf_iter_loop_next)
+BTF_ID(func, bpf_iter_loop_destroy)
 
 static bool is_kfunc_ret_null(struct bpf_kfunc_call_arg_meta *meta)
 {
@@ -20159,7 +20165,16 @@ static int fixup_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 		   desc->func_id == special_kfunc_list[KF_bpf_scalar_cast]) {
 		insn_buf[0] = BPF_MOV64_REG(BPF_REG_0, BPF_REG_1);
 		*cnt = 1;
-	} else if (desc->func_id == special_kfunc_list[KF_bpf_iter_num_next]) {
+	} else if (desc->func_id == special_kfunc_list[KF_bpf_iter_loop_new]) {
+		insn_buf[0] = BPF_ST_MEM(BPF_W, BPF_REG_1, 0, -1);
+		insn_buf[1] = BPF_ST_MEM(BPF_W, BPF_REG_1, 4, BPF_MAX_LOOPS);
+		insn_buf[2] = BPF_MOV64_IMM(BPF_REG_0, 0);
+		*cnt = 3;
+	} else if (desc->func_id == special_kfunc_list[KF_bpf_iter_loop_destroy]) {
+		insn_buf[0] = BPF_ST_MEM(BPF_DW, BPF_REG_1, 0, 0);
+		*cnt = 1;
+	} else if (desc->func_id == special_kfunc_list[KF_bpf_iter_num_next] ||
+		   desc->func_id == special_kfunc_list[KF_bpf_iter_loop_next]) {
 		// r0 = s->cur
 		insn_buf[0] = BPF_LDX_MEM(BPF_W, BPF_REG_0, BPF_REG_1, 0);
 		// r2 = s->end
