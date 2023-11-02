@@ -11221,6 +11221,11 @@ static bool is_kfunc_arg_const_str(const struct btf *btf, const struct btf_param
 	return btf_param_match_suffix(btf, arg, "__str");
 }
 
+static bool is_kfunc_arg_heap_map(const struct btf *btf, const struct btf_param *arg)
+{
+	return btf_param_match_suffix(btf, arg, "__heap");
+}
+
 static bool is_kfunc_arg_scalar_with_name(const struct btf *btf,
 					  const struct btf_param *arg,
 					  const char *name)
@@ -11366,6 +11371,7 @@ enum kfunc_ptr_arg_type {
 	KF_ARG_PTR_TO_NULL,
 	KF_ARG_PTR_TO_CONST_STR,
 	KF_ARG_PTR_TO_MAP,
+	KF_ARG_PTR_TO_HEAP_MAP,
 };
 
 enum special_kfunc_type {
@@ -11398,6 +11404,7 @@ enum special_kfunc_type {
 	KF_bpf_iter_loop_new,
 	KF_bpf_iter_loop_next,
 	KF_bpf_iter_loop_destroy,
+	KF_bpf_register_heap,
 };
 
 BTF_SET_START(special_kfunc_set)
@@ -11462,6 +11469,7 @@ BTF_ID(func, bpf_iter_num_next)
 BTF_ID(func, bpf_iter_loop_new)
 BTF_ID(func, bpf_iter_loop_next)
 BTF_ID(func, bpf_iter_loop_destroy)
+BTF_ID(func, bpf_register_heap)
 
 static bool is_kfunc_ret_null(struct bpf_kfunc_call_arg_meta *meta)
 {
@@ -11535,6 +11543,10 @@ get_kfunc_ptr_arg_type(struct bpf_verifier_env *env,
 
 	if (is_kfunc_arg_map(meta->btf, &args[argno]))
 		return KF_ARG_PTR_TO_MAP;
+
+	/* Perform the check before reg2btf_ids which handles CONST_PTR_TO_MAP */
+	if (is_kfunc_arg_heap_map(meta->btf, &args[argno]))
+		return KF_ARG_PTR_TO_HEAP_MAP;
 
 	if ((base_type(reg->type) == PTR_TO_BTF_ID || reg2btf_ids[base_type(reg->type)])) {
 		if (!btf_type_is_struct(ref_t)) {
@@ -12169,6 +12181,7 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 		case KF_ARG_PTR_TO_CALLBACK:
 		case KF_ARG_PTR_TO_REFCOUNTED_KPTR:
 		case KF_ARG_PTR_TO_CONST_STR:
+		case KF_ARG_PTR_TO_HEAP_MAP:
 			/* Trusted by default */
 			break;
 		default:
@@ -12455,6 +12468,12 @@ static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_kfunc_call_
 			if (ret)
 				return ret;
 			break;
+		case KF_ARG_PTR_TO_HEAP_MAP:
+			if (reg->type != CONST_PTR_TO_MAP || reg->map_ptr->map_type != BPF_MAP_TYPE_HEAP) {
+				verbose(env, "arg#%d is not an heap map type\n", i);
+				return -EINVAL;
+			}
+			break;
 		}
 	}
 
@@ -12564,6 +12583,32 @@ static int check_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 				func_name, meta.func_id);
 			return err;
 		}
+	}
+
+	if (meta.func_id == special_kfunc_list[KF_bpf_register_heap]) {
+		if (env->prog->aux->heap) {
+			verbose(env, "kfunc %s#%d can only register a single heap\n",
+				func_name, meta.func_id);
+			return -EBUSY;
+		}
+		if (!env->allow_ptr_leaks || !env->bpf_capable) {
+			verbose(env, "CAP_BPF and CAP_PERFMON are required to use heap\n");
+			return -EPERM;
+		}
+		if (!env->prog->jit_requested) {
+			verbose(env, "JIT is required to use heap\n");
+			return -EOPNOTSUPP;
+		}
+		// TODO(kkd): Add JIT support function
+		// if (!bpf_jit_supports_heap()) {
+		//	verbose(env, "JIT doesn't support heap\n");
+		//	return -EOPNOTSUPP;
+		// }
+		if (env->prog->aux->arena) {
+			verbose(env, "program cannot use both arena and heap maps\n");
+			return -EINVAL;
+		}
+		env->prog->aux->heap = cur_regs(env)[BPF_REG_1].map_ptr;
 	}
 
 	rcu_lock = is_kfunc_bpf_rcu_read_lock(&meta);
@@ -19804,6 +19849,7 @@ static int jit_subprogs(struct bpf_verifier_env *env)
 		func[i]->aux->jited_linfo = prog->aux->jited_linfo;
 		func[i]->aux->linfo_idx = env->subprog_info[i].linfo_idx;
 		func[i]->aux->arena = prog->aux->arena;
+		func[i]->aux->heap = prog->aux->heap;
 		num_exentries = 0;
 		insn = func[i]->insnsi;
 		for (j = 0; j < func[i]->len; j++, insn++) {
@@ -20198,6 +20244,9 @@ static int fixup_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 		insn_buf[9] = BPF_MOV64_REG(BPF_REG_0, BPF_REG_1);
 		// end
 		*cnt = 10;
+	} else if (desc->func_id == special_kfunc_list[KF_bpf_register_heap]) {
+		insn_buf[0] = BPF_JMP_IMM(BPF_JA, 0, 0, 0);
+		*cnt = 1;
 	}
 	return 0;
 }
