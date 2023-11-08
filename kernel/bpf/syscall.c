@@ -272,7 +272,7 @@ static int bpf_map_copy_value(struct bpf_map *map, void *key, void *value,
  * (e.g. in map update path) without taking care of setting the active
  * memory cgroup (see at bpf_map_kmalloc_node() for example).
  */
-static void *__bpf_map_area_alloc(u64 size, int numa_node, bool mmapable)
+static void *__bpf_map_area_alloc(u64 size, u64 align, int numa_node, bool mmapable)
 {
 	/* We really just want to fail instead of triggering OOM killer
 	 * under memory pressure, therefore we set __GFP_NORETRY to kmalloc,
@@ -286,7 +286,6 @@ static void *__bpf_map_area_alloc(u64 size, int numa_node, bool mmapable)
 
 	gfp_t gfp = bpf_memcg_flags(__GFP_NOWARN | __GFP_ZERO);
 	unsigned int flags = 0;
-	unsigned long align = 1;
 	void *area;
 
 	if (size >= SIZE_MAX)
@@ -295,7 +294,6 @@ static void *__bpf_map_area_alloc(u64 size, int numa_node, bool mmapable)
 	/* kmalloc()'ed memory can't be mmap()'ed */
 	if (mmapable) {
 		BUG_ON(!PAGE_ALIGNED(size));
-		align = SHMLBA;
 		flags = VM_USERMAP;
 	} else if (size <= (PAGE_SIZE << PAGE_ALLOC_COSTLY_ORDER)) {
 		area = kmalloc_node(size, gfp | GFP_USER | __GFP_NORETRY,
@@ -311,12 +309,22 @@ static void *__bpf_map_area_alloc(u64 size, int numa_node, bool mmapable)
 
 void *bpf_map_area_alloc(u64 size, int numa_node)
 {
-	return __bpf_map_area_alloc(size, numa_node, false);
+	return __bpf_map_area_alloc(size, 1, numa_node, false);
+}
+
+void *bpf_map_area_alloc_aligned(u64 size, u64 align, int numa_node)
+{
+	return __bpf_map_area_alloc(size, align, numa_node, false);
 }
 
 void *bpf_map_area_mmapable_alloc(u64 size, int numa_node)
 {
-	return __bpf_map_area_alloc(size, numa_node, true);
+	return __bpf_map_area_alloc(size, SHMLBA, numa_node, true);
+}
+
+void *bpf_map_area_mmapable_alloc_aligned(u64 size, u64 align, int numa_node)
+{
+	return __bpf_map_area_alloc(size, align, numa_node, true);
 }
 
 void bpf_map_area_free(void *area)
