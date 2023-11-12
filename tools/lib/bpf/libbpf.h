@@ -1197,6 +1197,9 @@ LIBBPF_API int bpf_map__lookup_and_delete_elem(const struct bpf_map *map,
 LIBBPF_API int bpf_map__get_next_key(const struct bpf_map *map,
 				     const void *cur_key, void *next_key, size_t key_sz);
 
+// TODO(kkd): Document, also, what happens before create, maybe return error?
+LIBBPF_API void *bpf_map__heap_address(const struct bpf_map *map);
+
 struct bpf_xdp_set_link_opts {
 	size_t sz;
 	int old_fd;

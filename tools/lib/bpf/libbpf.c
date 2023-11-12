@@ -187,6 +187,7 @@ static const char * const map_type_name[] = {
 	[BPF_MAP_TYPE_USER_RINGBUF]             = "user_ringbuf",
 	[BPF_MAP_TYPE_CGRP_STORAGE]		= "cgrp_storage",
 	[BPF_MAP_TYPE_ARENA]			= "arena",
+	[BPF_MAP_TYPE_HEAP]			= "heap",
 };
 
 static const char * const prog_type_name[] = {
@@ -545,6 +546,7 @@ struct bpf_map {
 	void **init_slots;
 	int init_slots_sz;
 	char *pin_path;
+	void *heap_addr;
 	bool pinned;
 	bool reused;
 	bool autocreate;
@@ -1730,6 +1732,7 @@ static size_t bpf_map_mmap_sz(const struct bpf_map *map)
 	case BPF_MAP_TYPE_ARRAY:
 		return array_map_mmap_sz(map->def.value_size, map->def.max_entries);
 	case BPF_MAP_TYPE_ARENA:
+	case BPF_MAP_TYPE_HEAP:
 		return page_sz * map->def.max_entries;
 	default:
 		return 0; /* not supported */
@@ -5417,6 +5420,26 @@ retry:
 				}
 				pr_warn("map '%s': failed to auto-pin at '%s': %d\n",
 					map->name, map->pin_path, err);
+				goto err_out;
+			}
+		}
+
+		if (map->def.type == BPF_MAP_TYPE_HEAP) {
+			__u64 mmap_sz = bpf_map_mmap_sz(map);
+			__u64 it, addr;
+			for (it = 0, addr = mmap_sz * 1024; i < 1024; it++, addr += mmap_sz) {
+				map->heap_addr = mmap((void *)addr, mmap_sz, PROT_READ | PROT_WRITE,
+						      MAP_SHARED | MAP_FIXED, map->fd, 0);
+				if (map->heap_addr == MAP_FAILED)
+					continue;
+				else
+					break;
+			}
+			if (map->heap_addr == MAP_FAILED) {
+				err = -errno;
+				map->heap_addr = NULL;
+				pr_warn("failed to mmap heap map '%s': %d\n",
+					map->name, err);
 				goto err_out;
 			}
 		}
@@ -10444,6 +10467,11 @@ int bpf_map__get_next_key(const struct bpf_map *map,
 		return libbpf_err(err);
 
 	return bpf_map_get_next_key(map->fd, cur_key, next_key);
+}
+
+void *bpf_map__heap_address(const struct bpf_map *map)
+{
+	return map->heap_addr;
 }
 
 long libbpf_get_error(const void *ptr)
