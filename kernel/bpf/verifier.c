@@ -498,6 +498,7 @@ static bool is_dynptr_ref_function(enum bpf_func_id func_id)
 
 static bool is_sync_callback_calling_kfunc(u32 btf_id);
 static bool is_bpf_throw_kfunc(struct bpf_insn *insn);
+static bool is_inlined_kfunc(u32 btf_id);
 
 static bool is_sync_callback_calling_function(enum bpf_func_id func_id)
 {
@@ -12081,6 +12082,13 @@ static bool is_bpf_throw_kfunc(struct bpf_insn *insn)
 	       insn->imm == special_kfunc_list[KF_bpf_throw];
 }
 
+static bool is_inlined_kfunc(u32 btf_id)
+{
+	return btf_id == special_kfunc_list[KF_bpf_rdonly_cast] ||
+	       btf_id == special_kfunc_list[KF_bpf_rdonly_obj_cast] ||
+	       btf_id == special_kfunc_list[KF_bpf_scalar_cast];
+}
+
 static bool is_rbtree_lock_required_kfunc(u32 btf_id)
 {
 	return is_bpf_rbtree_api_kfunc(btf_id);
@@ -18835,7 +18843,8 @@ static int do_check(struct bpf_verifier_env *env)
 					    (insn->src_reg == BPF_PSEUDO_CALL) ||
 					    (insn->src_reg == BPF_PSEUDO_KFUNC_CALL &&
 					     (insn->off != 0 ||
-					      insn->imm != special_kfunc_list[KF_bpf_preempt_enable]))) {
+					      insn->imm != special_kfunc_list[KF_bpf_preempt_enable] ||
+					      !is_inlined_kfunc(insn->imm)))) {
 						verbose(env, "function calls are not allowed in a preempt_disable section\n");
 						return -EINVAL;
 					}
