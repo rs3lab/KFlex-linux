@@ -2665,6 +2665,16 @@ __bpf_kfunc void bpf_register_heap(void *map__heap)
 	return;
 }
 
+__bpf_kfunc void bpf_preempt_disable(void)
+{
+	preempt_disable();
+}
+
+__bpf_kfunc void bpf_preempt_enable(void)
+{
+	preempt_enable();
+}
+
 __bpf_kfunc_end_defs();
 
 BTF_KFUNCS_START(generic_btf_ids)
@@ -2699,6 +2709,8 @@ BTF_ID_FLAGS(func, bpf_throw)
 BTF_ID_FLAGS(func, bpf_rdonly_obj_cast)
 BTF_ID_FLAGS(func, bpf_scalar_cast)
 BTF_ID_FLAGS(func, bpf_register_heap)
+BTF_ID_FLAGS(func, bpf_preempt_disable)
+BTF_ID_FLAGS(func, bpf_preempt_enable)
 BTF_KFUNCS_END(generic_btf_ids)
 
 static const struct btf_kfunc_id_set generic_kfunc_set = {
