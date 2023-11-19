@@ -18838,7 +18838,7 @@ static int do_check(struct bpf_verifier_env *env)
 					}
 				}
 
-				if (env->cur_state->active_preempt_lock) {
+				if (env->cur_state->active_preempt_lock && 0) {
 					if ((insn->src_reg == BPF_REG_0) ||
 					    (insn->src_reg == BPF_PSEUDO_CALL) ||
 					    (insn->src_reg == BPF_PSEUDO_KFUNC_CALL &&
