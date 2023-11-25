@@ -18832,7 +18832,10 @@ static int do_check(struct bpf_verifier_env *env)
 				if (env->cur_state->active_lock.ptr) {
 					if ((insn->src_reg == BPF_REG_0 && insn->imm != BPF_FUNC_spin_unlock) ||
 					    (insn->src_reg == BPF_PSEUDO_KFUNC_CALL &&
-					     (insn->off != 0 || !is_bpf_graph_api_kfunc(insn->imm)))) {
+					     (insn->off != 0 ||
+					      (insn->imm != special_kfunc_list[KF_bpf_dynptr_slice_rdwr] &&
+					       insn->imm != special_kfunc_list[KF_bpf_dynptr_slice] &&
+					       !is_bpf_graph_api_kfunc(insn->imm))))) {
 						verbose(env, "function calls are not allowed while holding a lock\n");
 						return -EINVAL;
 					}
