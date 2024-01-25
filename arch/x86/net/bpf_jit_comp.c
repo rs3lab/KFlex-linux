@@ -654,9 +654,10 @@ static void emit_bpf_tail_call_indirect(struct bpf_prog *bpf_prog,
 	offset = ctx->tail_call_indirect_label - (prog + 2 - start);
 	EMIT2(X86_JE, offset);                    /* je out */
 
-	if (bpf_prog->aux->exception_boundary) {
+	if (bpf_prog->aux->exception_boundary || bpf_prog->aux->bpf_throw_tramp) {
 		pop_callee_regs(&prog, all_callee_regs_used);
-		pop_r12(&prog);
+		if (bpf_prog->aux->exception_boundary)
+			pop_r12(&prog);
 	} else {
 		pop_callee_regs(&prog, callee_regs_used);
 		if (bpf_arena_get_kern_vm_start(bpf_prog->aux->arena))
@@ -715,9 +716,10 @@ static void emit_bpf_tail_call_direct(struct bpf_prog *bpf_prog,
 	emit_jump(&prog, (u8 *)poke->tailcall_target + X86_PATCH_SIZE,
 		  poke->tailcall_bypass);
 
-	if (bpf_prog->aux->exception_boundary) {
+	if (bpf_prog->aux->exception_boundary || bpf_prog->aux->bpf_throw_tramp) {
 		pop_callee_regs(&prog, all_callee_regs_used);
-		pop_r12(&prog);
+		if (bpf_prog->aux->exception_boundary)
+			pop_r12(&prog);
 	} else {
 		pop_callee_regs(&prog, callee_regs_used);
 		if (bpf_arena_get_kern_vm_start(bpf_prog->aux->arena))
@@ -1348,12 +1350,9 @@ static int do_jit(struct bpf_prog *bpf_prog, int *addrs, u8 *image, u8 *rw_image
 	/* Exception callback will clobber callee regs for its own use, and
 	 * restore the original callee regs from main prog's stack frame.
 	 */
-	if (bpf_prog->aux->exception_boundary) {
-		/* We also need to save r12, which is not mapped to any BPF
-		 * register, as we throw after entry into the kernel, which may
-		 * overwrite r12.
-		 */
-		push_r12(&prog);
+	if (bpf_prog->aux->exception_boundary || bpf_prog->aux->bpf_throw_tramp) {
+		if (bpf_prog->aux->exception_boundary)
+			push_r12(&prog);
 		push_callee_regs(&prog, all_callee_regs_used);
 	} else {
 		if (arena_vm_start)
@@ -2322,9 +2321,10 @@ emit_jmp:
 			seen_exit = true;
 			/* Update cleanup_addr */
 			ctx->cleanup_addr = proglen;
-			if (bpf_prog->aux->exception_boundary) {
+			if (bpf_prog->aux->exception_boundary || bpf_prog->aux->bpf_throw_tramp) {
 				pop_callee_regs(&prog, all_callee_regs_used);
-				pop_r12(&prog);
+				if (bpf_prog->aux->exception_boundary)
+					pop_r12(&prog);
 			} else {
 				pop_callee_regs(&prog, callee_regs_used);
 				if (arena_vm_start)
