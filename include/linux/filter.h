@@ -998,6 +998,7 @@ bool bpf_jit_supports_percpu_insn(void);
 bool bpf_jit_supports_kfunc_call(void);
 bool bpf_jit_supports_far_kfunc_call(void);
 bool bpf_jit_supports_exceptions(void);
+bool bpf_jit_supports_exceptions_cleanup(void);
 bool bpf_jit_supports_ptr_xchg(void);
 bool bpf_jit_supports_arena(void);
 bool bpf_jit_supports_insn(struct bpf_insn *insn, bool in_arena);
@@ -1668,5 +1669,7 @@ static inline void bpf_xdp_copy_buf(struct xdp_buff *xdp, unsigned long off, voi
 {
 }
 #endif /* CONFIG_NET */
+
+void bpf_sk_release_dtor(void *ptr);
 
 #endif /* __LINUX_FILTER_H__ */

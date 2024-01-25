@@ -3023,6 +3023,11 @@ bool __weak bpf_jit_supports_exceptions(void)
 	return false;
 }
 
+bool __weak bpf_jit_supports_exceptions_cleanup(void)
+{
+	return false;
+}
+
 void __weak arch_bpf_stack_walk(bool (*consume_fn)(void *cookie, u64 ip, u64 sp, u64 bp), void *cookie)
 {
 }
@@ -3036,6 +3041,11 @@ __weak u64 bpf_arena_get_user_vm_start(struct bpf_arena *arena)
 __weak u64 bpf_arena_get_kern_vm_start(struct bpf_arena *arena)
 {
 	return 0;
+}
+
+void __weak arch_bpf_cleanup_frame_resource(struct bpf_prog *prog, struct bpf_throw_ctx *ctx, u64 ip, u64 sp, u64 bp)
+{
+	return;
 }
 
 #ifdef CONFIG_BPF_SYSCALL
