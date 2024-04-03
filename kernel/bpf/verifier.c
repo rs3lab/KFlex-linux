@@ -14834,6 +14834,16 @@ static int check_alu_op(struct bpf_verifier_env *env, struct bpf_insn *insn)
 					}
 					goto done;
 				}
+				// TODO(kkd): Same hack for heap_btf_cast
+				if (insn->imm < 0) {
+					insn->off = BPF_HEAP_BTF_CAST;
+					insn->imm = -insn->imm;
+					if (!env->prog->aux->heap) {
+						verbose(env, "heap cast instructions can be used in program with heap\n");
+						return -EINVAL;
+					}
+					goto done;
+				}
 				if (insn->imm != 1 && insn->imm != 1u << 16) {
 					verbose(env, "addr_space_cast insn can only convert between address space 1 and 0\n");
 					return -EINVAL;
@@ -14844,6 +14854,9 @@ static int check_alu_op(struct bpf_verifier_env *env, struct bpf_insn *insn)
 				}
 				done:;
 			} else if (insn->off == BPF_HEAP_SFI_GUARD || insn->off == BPF_HEAP_SFI_GUARD_TRANS_U2K) {
+				// Nothing, just make sure not to error when
+				// seeing it again.
+			} else if (insn->off == BPF_HEAP_BTF_CAST) {
 				// Nothing, just make sure not to error when
 				// seeing it again.
 			} else {
@@ -14901,6 +14914,48 @@ static int check_alu_op(struct bpf_verifier_env *env, struct bpf_insn *insn)
 					mark_btf_ld_reg(env, cur_regs(env), insn->dst_reg, PTR_TO_BTF_ID, prog_btf, btf_id, MEM_HEAP);
 					// No need to add insn fixups, as JIT
 					// will process these instructions.
+				} else if (insn->off == BPF_HEAP_BTF_CAST) {
+					struct btf *prog_btf = env->prog->aux->btf;
+					u32 btf_id = src_reg->var_off.value;
+					u32 heap_off = dst_reg->heap_off;
+					const struct btf_type *t;
+					int type = dst_reg->type;
+
+					if (!prog_btf) {
+						verbose(env, "heap_btf_cast cannot be used without prog BTF\n");
+						return -EINVAL;
+					}
+
+					if (insn->dst_reg == insn->src_reg) {
+						verbose(env, "heap_btf_cast invalid instruction encoding\n");
+						return -EINVAL;
+					}
+
+					if (!is_reg_const(src_reg, false)) {
+						verbose(env, "src type ID must be a constant value\n");
+						return -EINVAL;
+					}
+
+					t = btf_type_by_id(prog_btf, btf_id);
+					if (!t || (!btf_type_is_struct(t) && !btf_type_is_void(t))) {
+						verbose(env, "heap_btf_cast must cast to a struct or void type\n");
+						return -EINVAL;
+					}
+					// Can only type pun a heap pointer to
+					// another heap pointer. We want to keep
+					// track of the heap_off, otherwise we
+					// will need guard instructions
+					// everytime we do black box casting.
+					if (!type_is_heap(dst_reg->type) && !register_is_null(dst_reg)) {
+						verbose(env, "heap cast insn must be used on heap pointer\n");
+						return -EINVAL;
+					}
+					// Mark a fresh pointer
+					mark_btf_ld_reg(env, cur_regs(env), insn->dst_reg, PTR_TO_BTF_ID, prog_btf, btf_id, MEM_HEAP);
+					// Restore old type
+					dst_reg->type = type;
+					// Restore current off
+					dst_reg->heap_off = heap_off;
 				} else if (insn->off == 0) {
 					/* case: R1 = R2
 					 * copy register state to dest reg

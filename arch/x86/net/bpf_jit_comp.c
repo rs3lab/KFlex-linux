@@ -1444,6 +1444,8 @@ static int do_jit(struct bpf_prog *bpf_prog, int *addrs, u8 *image, u8 *rw_image
 				EMIT3(0x03, add_1reg(0x04, dst_reg), 0x25);
 				EMIT((u32)(unsigned long)&this_cpu_off, 4);
 #endif
+			} else if (insn_is_cast_heap(insn)) {
+				/* Noop for JIT */
 				break;
 			} else if (insn_is_heap_sfi(insn)) {
 				struct bpf_map *heap = bpf_prog->aux->heap;

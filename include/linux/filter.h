@@ -296,6 +296,20 @@ static inline bool insn_is_heap_sfi(const struct bpf_insn *insn)
 		.off   = BPF_HEAP_SFI_GUARD_TRANS_U2K,		\
 		.imm   = 0 })
 
+static inline bool insn_is_cast_heap(const struct bpf_insn *insn)
+{
+	return insn->code == (BPF_ALU64 | BPF_MOV | BPF_X) &&
+			      insn->off == BPF_HEAP_BTF_CAST;
+}
+
+#define BPF_HEAP_BTF_CAST(DST, BTF_ID)				\
+	((struct bpf_insn) {					\
+		.code  = BPF_ALU64 | BPF_MOV | BPF_X,		\
+		.dst_reg = DST,					\
+		.src_reg = DST,					\
+		.off   = BPF_HEAP_BTF_CAST,			\
+		.imm   = BTF_ID })
+
 /* BPF_LD_IMM64 macro encodes single 'load 64-bit immediate' insn */
 #define BPF_LD_IMM64(DST, IMM)					\
 	BPF_LD_IMM64_RAW(DST, 0, IMM)

@@ -1351,6 +1351,10 @@ enum bpf_heap_sfi_insn {
 	BPF_HEAP_SFI_TRANS_K2U = 4,
 };
 
+enum {
+	BPF_HEAP_BTF_CAST = 5,
+};
+
 /* flags for BPF_MAP_UPDATE_ELEM command */
 enum {
 	BPF_ANY		= 0, /* create new element or update existing */
