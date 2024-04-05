@@ -263,6 +263,39 @@ static inline bool insn_is_cast_user(const struct bpf_insn *insn)
 			      insn->imm == 1U << 16;
 }
 
+static inline bool insn_is_heap_sfi(const struct bpf_insn *insn)
+{
+	return insn->code == (BPF_ALU64 | BPF_MOV | BPF_X) &&
+			      (insn->off == BPF_HEAP_SFI_GUARD ||
+			       insn->off == BPF_HEAP_SFI_TRANS_K2U ||
+			       insn->off == BPF_HEAP_SFI_GUARD_TRANS_U2K) &&
+			      insn->imm == 0;
+}
+
+#define BPF_HEAP_GUARD_REG(DST)					\
+	((struct bpf_insn) {					\
+		.code  = BPF_ALU64 | BPF_MOV | BPF_X,		\
+		.dst_reg = DST,					\
+		.src_reg = DST,					\
+		.off   = BPF_HEAP_SFI_GUARD,			\
+		.imm   = 0 })
+
+#define BPF_HEAP_TRANS_K2U_REG(DST, SRC)			\
+	((struct bpf_insn) {					\
+		.code  = BPF_ALU64 | BPF_MOV | BPF_X,		\
+		.dst_reg = DST,					\
+		.src_reg = SRC,					\
+		.off   = BPF_HEAP_SFI_TRANS_K2U,		\
+		.imm   = 0 })
+
+#define BPF_HEAP_GUARD_TRANS_U2K_REG(DST)			\
+	((struct bpf_insn) {					\
+		.code  = BPF_ALU64 | BPF_MOV | BPF_X,		\
+		.dst_reg = DST,					\
+		.src_reg = DST,					\
+		.off   = BPF_HEAP_SFI_GUARD_TRANS_U2K,		\
+		.imm   = 0 })
+
 /* BPF_LD_IMM64 macro encodes single 'load 64-bit immediate' insn */
 #define BPF_LD_IMM64(DST, IMM)					\
 	BPF_LD_IMM64_RAW(DST, 0, IMM)

@@ -18,6 +18,7 @@
 #include <asm/text-patching.h>
 #include <asm/unwind.h>
 #include <asm/cfi.h>
+#include <linux/bitops.h>
 
 static bool all_callee_regs_used[4] = {true, true, true, true};
 
@@ -660,7 +661,7 @@ static void emit_bpf_tail_call_indirect(struct bpf_prog *bpf_prog,
 			pop_r12(&prog);
 	} else {
 		pop_callee_regs(&prog, callee_regs_used);
-		if (bpf_arena_get_kern_vm_start(bpf_prog->aux->arena))
+		if (bpf_arena_get_kern_vm_start(bpf_prog->aux->arena) || bpf_prog->aux->heap)
 			pop_r12(&prog);
 	}
 
@@ -722,7 +723,7 @@ static void emit_bpf_tail_call_direct(struct bpf_prog *bpf_prog,
 			pop_r12(&prog);
 	} else {
 		pop_callee_regs(&prog, callee_regs_used);
-		if (bpf_arena_get_kern_vm_start(bpf_prog->aux->arena))
+		if (bpf_arena_get_kern_vm_start(bpf_prog->aux->arena) || bpf_prog->aux->heap)
 			pop_r12(&prog);
 	}
 
@@ -1003,6 +1004,28 @@ static void emit_ldsx(u8 **pprog, u32 size, u32 dst_reg, u32 src_reg, int off)
 	*pprog = prog;
 }
 
+static void emit_ldsx_index(u8 **pprog, u32 size, u32 dst_reg, u32 src_reg, u32 index_reg, int off)
+{
+	u8 *prog = *pprog;
+
+	switch (size) {
+	case BPF_B:
+		/* movsx rax, byte ptr [rax + r12 + off] */
+		EMIT3(add_3mod(0x40, src_reg, dst_reg, index_reg), 0x0F, 0xBE);
+		break;
+	case BPF_H:
+		/* movsx rax, word ptr [rax + r12 + off] */
+		EMIT3(add_3mod(0x40, src_reg, dst_reg, index_reg), 0x0F, 0xBF);
+		break;
+	case BPF_W:
+		/* movsx rax, dword ptr [rax + r12 + off] */
+		EMIT2(add_3mod(0x40, src_reg, dst_reg, index_reg), 0x63);
+		break;
+	}
+	emit_insn_suffix_SIB(&prog, src_reg, dst_reg, index_reg, off);
+	*pprog = prog;
+}
+
 static void emit_ldx_index(u8 **pprog, u32 size, u32 dst_reg, u32 src_reg, u32 index_reg, int off)
 {
 	u8 *prog = *pprog;
@@ -1032,6 +1055,11 @@ static void emit_ldx_index(u8 **pprog, u32 size, u32 dst_reg, u32 src_reg, u32 i
 static void emit_ldx_r12(u8 **pprog, u32 size, u32 dst_reg, u32 src_reg, int off)
 {
 	emit_ldx_index(pprog, size, dst_reg, src_reg, X86_REG_R12, off);
+}
+
+static void emit_ldsx_r12(u8 **pprog, u32 size, u32 dst_reg, u32 src_reg, int off)
+{
+	emit_ldsx_index(pprog, size, dst_reg, src_reg, X86_REG_R12, off);
 }
 
 /* STX: *(u8*)(dst_reg + off) = src_reg */
@@ -1307,13 +1335,36 @@ static int do_jit(struct bpf_prog *bpf_prog, int *addrs, u8 *image, u8 *rw_image
 			push_r12(&prog);
 		push_callee_regs(&prog, all_callee_regs_used);
 	} else {
-		if (arena_vm_start)
+		if (arena_vm_start || bpf_prog->aux->heap)
 			push_r12(&prog);
 		push_callee_regs(&prog, callee_regs_used);
 	}
-	if (arena_vm_start)
+	if (arena_vm_start) {
 		emit_mov_imm64(&prog, X86_REG_R12,
 			       arena_vm_start >> 32, (u32) arena_vm_start);
+	} else if (bpf_prog->aux->heap) {
+		switch (bpf_prog->aux->heap_sfi_mode) {
+		case BPF_HEAP_SFI_NONE:
+		case BPF_HEAP_SFI_SHFT:
+		case BPF_HEAP_SFI_BITM:
+		case BPF_HEAP_SFI_BASE:
+		case BPF_HEAP_SFI_SHFT_PERF:
+		case BPF_HEAP_SFI_BITM_PERF:
+		case BPF_HEAP_SFI_BASE_PERF:
+			// movq r12, kbase
+			emit_mov_imm64(&prog, X86_REG_R12,
+				       bpf_prog->aux->heap->kernel_base_addr >> 32,
+				       (u32)bpf_prog->aux->heap->kernel_base_addr);
+			// movq r9, kmask
+			emit_mov_imm64(&prog, X86_REG_R9,
+				       bpf_prog->aux->heap->kernel_addr_mask >> 32,
+				       (u32)bpf_prog->aux->heap->kernel_addr_mask);
+			break;
+		default:
+			pr_err("Unhandled heap SFI mode\n");
+			return -EFAULT;
+		}
+	}
 
 	ilen = prog - temp;
 	if (rw_image)
@@ -1393,6 +1444,249 @@ static int do_jit(struct bpf_prog *bpf_prog, int *addrs, u8 *image, u8 *rw_image
 				EMIT3(0x03, add_1reg(0x04, dst_reg), 0x25);
 				EMIT((u32)(unsigned long)&this_cpu_off, 4);
 #endif
+				break;
+			} else if (insn_is_heap_sfi(insn)) {
+				struct bpf_map *heap = bpf_prog->aux->heap;
+				u64 kernel_base_addr;
+				u64 kernel_addr_mask;
+				u64 user_base_addr;
+
+				if (!heap) {
+					pr_err("Use of heap SFI insns without heap\n");
+					return -EFAULT;
+				}
+
+				if (insn->imm) {
+					pr_err("Invalid heap SFI insn encoding\n");
+					return -EFAULT;
+				}
+
+				kernel_base_addr = heap->kernel_base_addr;
+				kernel_addr_mask = heap->kernel_addr_mask;
+				user_base_addr = heap->user_base_addr;
+
+				switch (insn->off) {
+				case BPF_HEAP_SFI_GUARD:
+					// We're always steering the value in
+					// the heap domain using this, so dst
+					// should be same as src.
+					if (dst_reg != src_reg) {
+						pr_err("Invalid heap SFI insn encoding\n");
+						return -EFAULT;
+					}
+					switch (bpf_prog->aux->heap_sfi_mode) {
+					case BPF_HEAP_SFI_NONE:
+						break;
+					case BPF_HEAP_SFI_SHFT:
+					case BPF_HEAP_SFI_SHFT_PERF:
+						// shl dst, cnt
+						maybe_emit_1mod(&prog, dst_reg, true);
+						EMIT3(0xC1, add_1reg(0xE0, dst_reg),
+						      64 - hweight_long(kernel_addr_mask));
+						// shr dst, cnt
+						maybe_emit_1mod(&prog, dst_reg, true);
+						EMIT3(0xC1, add_1reg(0xE8, dst_reg),
+						      64 - hweight_long(kernel_addr_mask));
+						// or dst, kbase
+						maybe_emit_mod(&prog, dst_reg, X86_REG_R12, true);
+						b2 = simple_alu_opcodes[BPF_OR];
+						EMIT2(b2, add_2reg(0xC0, dst_reg, X86_REG_R12));
+						break;
+					case BPF_HEAP_SFI_BITM:
+					case BPF_HEAP_SFI_BITM_PERF:
+						// and dst, kmask
+						maybe_emit_mod(&prog, dst_reg, X86_REG_R9, true);
+						b2 = simple_alu_opcodes[BPF_AND];
+						EMIT2(b2, add_2reg(0xC0, dst_reg, X86_REG_R9));
+						// or dst, kbase
+						maybe_emit_mod(&prog, dst_reg, X86_REG_R12, true);
+						b2 = simple_alu_opcodes[BPF_OR];
+						EMIT2(b2, add_2reg(0xC0, dst_reg, X86_REG_R12));
+						break;
+					case BPF_HEAP_SFI_BASE:
+					case BPF_HEAP_SFI_BASE_PERF:
+						// and dst, kmask
+						maybe_emit_mod(&prog, dst_reg, X86_REG_R9, true);
+						b2 = simple_alu_opcodes[BPF_AND];
+						EMIT2(b2, add_2reg(0xC0, dst_reg, X86_REG_R9));
+						break;
+					default:
+						pr_err("Unhandled heap SFI mode\n");
+						return -EFAULT;
+					}
+					break;
+				case BPF_HEAP_SFI_TRANS_K2U:
+					// dst can never equal src, since we
+					// form a new value which is stored
+					// in a user data structure.
+					// TODO(kkd): This could be done better
+					// using the compiler, esp. around reuse
+					// of translated values, but for now
+					// just stick to this logic.
+					if (dst_reg == src_reg) {
+						pr_err("Invalid heap SFI insn encoding\n");
+						return -EFAULT;
+					}
+					switch (bpf_prog->aux->heap_sfi_mode) {
+					case BPF_HEAP_SFI_NONE:
+						// mov aux, ubase
+						emit_mov_imm64(&prog, AUX_REG,
+							       user_base_addr >> 32,
+							       user_base_addr);
+						// mov dst, src
+						emit_mov_reg(&prog, true, dst_reg, src_reg);
+						// and dst, kmask
+						maybe_emit_mod(&prog, dst_reg, X86_REG_R9, true);
+						b2 = simple_alu_opcodes[BPF_AND];
+						EMIT2(b2, add_2reg(0xC0, dst_reg, X86_REG_R9));
+						// or dst, aux
+						maybe_emit_mod(&prog, dst_reg, AUX_REG, true);
+						b2 = simple_alu_opcodes[BPF_OR];
+						EMIT2(b2, add_2reg(0xC0, dst_reg, AUX_REG));
+						// test src, src
+						maybe_emit_mod(&prog, src_reg, src_reg, true);
+						EMIT2(0x85, add_2reg(0xC0, src_reg, src_reg));
+						// cmove src, dst
+						maybe_emit_mod(&prog, src_reg, dst_reg, true);
+						EMIT3(0x0F, 0x44, add_2reg(0xC0, src_reg, dst_reg));
+						break;
+					case BPF_HEAP_SFI_SHFT:
+					case BPF_HEAP_SFI_SHFT_PERF:
+						// mov aux, ubase
+						emit_mov_imm64(&prog, AUX_REG,
+							       user_base_addr >> 32,
+							       user_base_addr);
+						// mov dst, src
+						emit_mov_reg(&prog, true, dst_reg, src_reg);
+						// shl dst, cnt
+						maybe_emit_1mod(&prog, dst_reg, true);
+						EMIT3(0xC1, add_1reg(0xE0, dst_reg),
+						      64 - hweight_long(kernel_addr_mask));
+						// shr dst, cnt
+						maybe_emit_1mod(&prog, dst_reg, true);
+						EMIT3(0xC1, add_1reg(0xE8, dst_reg),
+						      64 - hweight_long(kernel_addr_mask));
+						// or dst, aux
+						maybe_emit_mod(&prog, dst_reg, AUX_REG, true);
+						b2 = simple_alu_opcodes[BPF_OR];
+						EMIT2(b2, add_2reg(0xC0, dst_reg, AUX_REG));
+						// test src, src
+						maybe_emit_mod(&prog, src_reg, src_reg, true);
+						EMIT2(0x85, add_2reg(0xC0, src_reg, src_reg));
+						// cmove src, dst
+						maybe_emit_mod(&prog, src_reg, dst_reg, true);
+						EMIT3(0x0F, 0x44, add_2reg(0xC0, src_reg, dst_reg));
+						break;
+					case BPF_HEAP_SFI_BITM:
+					case BPF_HEAP_SFI_BITM_PERF:
+						// mov aux, ubase
+						emit_mov_imm64(&prog, AUX_REG,
+							       user_base_addr >> 32,
+							       user_base_addr);
+						// mov dst, src
+						emit_mov_reg(&prog, true, dst_reg, src_reg);
+						// and dst, kmask
+						maybe_emit_mod(&prog, dst_reg, X86_REG_R9, true);
+						b2 = simple_alu_opcodes[BPF_AND];
+						EMIT2(b2, add_2reg(0xC0, dst_reg, X86_REG_R9));
+						// or dst, aux
+						maybe_emit_mod(&prog, dst_reg, AUX_REG, true);
+						b2 = simple_alu_opcodes[BPF_OR];
+						EMIT2(b2, add_2reg(0xC0, dst_reg, AUX_REG));
+						// test src, src
+						maybe_emit_mod(&prog, src_reg, src_reg, true);
+						EMIT2(0x85, add_2reg(0xC0, src_reg, src_reg));
+						// cmove src, dst
+						maybe_emit_mod(&prog, src_reg, dst_reg, true);
+						EMIT3(0x0F, 0x44, add_2reg(0xC0, src_reg, dst_reg));
+						break;
+					case BPF_HEAP_SFI_BASE:
+					case BPF_HEAP_SFI_BASE_PERF:
+						// mov dst, ubase
+						emit_mov_imm64(&prog, dst_reg,
+							       user_base_addr >> 32,
+							       user_base_addr);
+						// or dst, src
+						maybe_emit_mod(&prog, dst_reg, src_reg, true);
+						b2 = simple_alu_opcodes[BPF_OR];
+						EMIT2(b2, add_2reg(0xC0, dst_reg, src_reg));
+						// test src, src
+						maybe_emit_mod(&prog, src_reg, src_reg, true);
+						EMIT2(0x85, add_2reg(0xC0, src_reg, src_reg));
+						// cmove src, dst
+						maybe_emit_mod(&prog, src_reg, dst_reg, true);
+						EMIT3(0x0F, 0x44, add_2reg(0xC0, src_reg, dst_reg));
+						break;
+					default:
+						pr_err("Unhandled heap SFI mode\n");
+						return -EFAULT;
+					}
+					break;
+				case BPF_HEAP_SFI_GUARD_TRANS_U2K:
+					if (dst_reg != src_reg) {
+						pr_err("Invalid heap SFI insn encoding\n");
+						return -EFAULT;
+					}
+					switch (bpf_prog->aux->heap_sfi_mode) {
+					case BPF_HEAP_SFI_NONE:
+					case BPF_HEAP_SFI_BITM:
+					case BPF_HEAP_SFI_BITM_PERF:
+						// mov aux, kbase
+						emit_mov_reg(&prog, true, AUX_REG, X86_REG_R12);
+						// and dst, kmask
+						maybe_emit_mod(&prog, dst_reg, X86_REG_R9, true);
+						b2 = simple_alu_opcodes[BPF_AND];
+						EMIT2(b2, add_2reg(0xC0, dst_reg, X86_REG_R9));
+						// or aux, dst
+						maybe_emit_mod(&prog, AUX_REG, dst_reg, true);
+						b2 = simple_alu_opcodes[BPF_OR];
+						EMIT2(b2, add_2reg(0xC0, AUX_REG, dst_reg));
+						// test dst, dst
+						maybe_emit_mod(&prog, dst_reg, dst_reg, true);
+						EMIT2(0x85, add_2reg(0xC0, dst_reg, dst_reg));
+						// cmovne aux, dst
+						maybe_emit_mod(&prog, AUX_REG, dst_reg, true);
+						EMIT3(0x0F, 0x45, add_2reg(0xC0, AUX_REG, dst_reg));
+						break;
+					case BPF_HEAP_SFI_SHFT:
+					case BPF_HEAP_SFI_SHFT_PERF:
+						// mov aux, kbase
+						emit_mov_reg(&prog, true, AUX_REG, X86_REG_R12);
+						// shl dst, cnt
+						maybe_emit_1mod(&prog, dst_reg, true);
+						EMIT3(0xC1, add_1reg(0xE0, dst_reg),
+						      64 - hweight_long(kernel_addr_mask));
+						// shr dst, cnt
+						maybe_emit_1mod(&prog, dst_reg, true);
+						EMIT3(0xC1, add_1reg(0xE8, dst_reg),
+						      64 - hweight_long(kernel_addr_mask));
+						// or aux, dst
+						maybe_emit_mod(&prog, AUX_REG, dst_reg, true);
+						b2 = simple_alu_opcodes[BPF_OR];
+						EMIT2(b2, add_2reg(0xC0, AUX_REG, dst_reg));
+						// test dst, dst
+						maybe_emit_mod(&prog, dst_reg, dst_reg, true);
+						EMIT2(0x85, add_2reg(0xC0, dst_reg, dst_reg));
+						// cmovne aux, dst
+						maybe_emit_mod(&prog, AUX_REG, dst_reg, true);
+						EMIT3(0x0F, 0x45, add_2reg(0xC0, AUX_REG, dst_reg));
+						break;
+					case BPF_HEAP_SFI_BASE:
+					case BPF_HEAP_SFI_BASE_PERF:
+						// and dst, kmask
+						maybe_emit_mod(&prog, dst_reg, X86_REG_R9, true);
+						b2 = simple_alu_opcodes[BPF_AND];
+						EMIT2(b2, add_2reg(0xC0, dst_reg, X86_REG_R9));
+						break;
+					default:
+						pr_err("Unhandled heap SFI mode\n");
+						return -EFAULT;
+					}
+					break;
+				default:
+					pr_err("Unhandled heap SFI insn case\n");
+					return -EFAULT;
+				}
 				break;
 			}
 			fallthrough;
@@ -1711,24 +2005,44 @@ static int do_jit(struct bpf_prog *bpf_prog, int *addrs, u8 *image, u8 *rw_image
 
 			/* ST: *(u8*)(dst_reg + off) = imm */
 		case BPF_ST | BPF_MEM | BPF_B:
+		case BPF_ST | BPF_PROBE_HEAP | BPF_B:
+			if (BPF_MODE(insn->code) == BPF_PROBE_HEAP &&
+			    (bpf_prog->aux->heap_sfi_mode == BPF_HEAP_SFI_BASE ||
+			     bpf_prog->aux->heap_sfi_mode == BPF_HEAP_SFI_BASE_PERF))
+				goto bpf_st_heap;
 			if (is_ereg(dst_reg))
 				EMIT2(0x41, 0xC6);
 			else
 				EMIT1(0xC6);
 			goto st;
 		case BPF_ST | BPF_MEM | BPF_H:
+		case BPF_ST | BPF_PROBE_HEAP | BPF_H:
+			if (BPF_MODE(insn->code) == BPF_PROBE_HEAP &&
+			    (bpf_prog->aux->heap_sfi_mode == BPF_HEAP_SFI_BASE ||
+			     bpf_prog->aux->heap_sfi_mode == BPF_HEAP_SFI_BASE_PERF))
+				goto bpf_st_heap;
 			if (is_ereg(dst_reg))
 				EMIT3(0x66, 0x41, 0xC7);
 			else
 				EMIT2(0x66, 0xC7);
 			goto st;
 		case BPF_ST | BPF_MEM | BPF_W:
+		case BPF_ST | BPF_PROBE_HEAP | BPF_W:
+			if (BPF_MODE(insn->code) == BPF_PROBE_HEAP &&
+			    (bpf_prog->aux->heap_sfi_mode == BPF_HEAP_SFI_BASE ||
+			     bpf_prog->aux->heap_sfi_mode == BPF_HEAP_SFI_BASE_PERF))
+				goto bpf_st_heap;
 			if (is_ereg(dst_reg))
 				EMIT2(0x41, 0xC7);
 			else
 				EMIT1(0xC7);
 			goto st;
 		case BPF_ST | BPF_MEM | BPF_DW:
+		case BPF_ST | BPF_PROBE_HEAP | BPF_DW:
+			if (BPF_MODE(insn->code) == BPF_PROBE_HEAP &&
+			    (bpf_prog->aux->heap_sfi_mode == BPF_HEAP_SFI_BASE ||
+			     bpf_prog->aux->heap_sfi_mode == BPF_HEAP_SFI_BASE_PERF))
+				goto bpf_st_heap;
 			EMIT2(add_1mod(0x48, dst_reg), 0xC7);
 
 st:			if (is_imm8(insn->off))
@@ -1747,6 +2061,17 @@ st:			if (is_imm8(insn->off))
 			emit_stx(&prog, BPF_SIZE(insn->code), dst_reg, src_reg, insn->off);
 			break;
 
+bpf_st_heap:
+			switch (bpf_prog->aux->heap_sfi_mode) {
+			case BPF_HEAP_SFI_BASE:
+			case BPF_HEAP_SFI_BASE_PERF:
+				emit_st_r12(&prog, BPF_SIZE(insn->code), dst_reg, insn->off, insn->imm);
+				break;
+			default:
+				pr_err("Unhandled heap SFI mode\n");
+				return -EFAULT;
+			}
+			break;
 		case BPF_ST | BPF_PROBE_MEM32 | BPF_B:
 		case BPF_ST | BPF_PROBE_MEM32 | BPF_H:
 		case BPF_ST | BPF_PROBE_MEM32 | BPF_W:
@@ -1756,6 +2081,48 @@ st:			if (is_imm8(insn->off))
 			goto populate_extable;
 
 			/* LDX: dst_reg = *(u8*)(src_reg + r12 + off) */
+		case BPF_LDX | BPF_PROBE_HEAP | BPF_B:
+		case BPF_LDX | BPF_PROBE_HEAP | BPF_H:
+		case BPF_LDX | BPF_PROBE_HEAP | BPF_W:
+		case BPF_LDX | BPF_PROBE_HEAP | BPF_DW:
+		case BPF_LDX | BPF_PROBE_HEAPSX | BPF_B:
+		case BPF_LDX | BPF_PROBE_HEAPSX | BPF_H:
+		case BPF_LDX | BPF_PROBE_HEAPSX | BPF_W:
+		case BPF_STX | BPF_PROBE_HEAP | BPF_B:
+		case BPF_STX | BPF_PROBE_HEAP | BPF_H:
+		case BPF_STX | BPF_PROBE_HEAP | BPF_W:
+		case BPF_STX | BPF_PROBE_HEAP | BPF_DW:
+			switch (bpf_prog->aux->heap_sfi_mode) {
+			case BPF_HEAP_SFI_NONE:
+			case BPF_HEAP_SFI_SHFT:
+			case BPF_HEAP_SFI_BITM:
+			case BPF_HEAP_SFI_SHFT_PERF:
+			case BPF_HEAP_SFI_BITM_PERF:
+				if (BPF_CLASS(insn->code) == BPF_LDX) {
+					if (BPF_MODE(insn->code) == BPF_PROBE_HEAPSX)
+						emit_ldsx(&prog, BPF_SIZE(insn->code), dst_reg, src_reg, insn->off);
+					else
+						emit_ldx(&prog, BPF_SIZE(insn->code), dst_reg, src_reg, insn->off);
+				} else {
+					emit_stx(&prog, BPF_SIZE(insn->code), dst_reg, src_reg, insn->off);
+				}
+				break;
+			case BPF_HEAP_SFI_BASE:
+			case BPF_HEAP_SFI_BASE_PERF:
+				if (BPF_CLASS(insn->code) == BPF_LDX) {
+					if (BPF_MODE(insn->code) == BPF_PROBE_HEAPSX)
+						emit_ldsx_r12(&prog, BPF_SIZE(insn->code), dst_reg, src_reg, insn->off);
+					else
+						emit_ldx_r12(&prog, BPF_SIZE(insn->code), dst_reg, src_reg, insn->off);
+				} else {
+					emit_stx_r12(&prog, BPF_SIZE(insn->code), dst_reg, src_reg, insn->off);
+				}
+				break;
+			default:
+				pr_err("Unhandled heap SFI mode\n");
+				return -EFAULT;
+			}
+			break;
 		case BPF_LDX | BPF_PROBE_MEM32 | BPF_B:
 		case BPF_LDX | BPF_PROBE_MEM32 | BPF_H:
 		case BPF_LDX | BPF_PROBE_MEM32 | BPF_W:
@@ -1924,10 +2291,33 @@ populate_extable:
 
 		case BPF_STX | BPF_ATOMIC | BPF_W:
 		case BPF_STX | BPF_ATOMIC | BPF_DW:
+		case BPF_STX | BPF_ATOMIC | BPF_B /* BPF_PROBE_HEAP */:
+		case BPF_STX | BPF_ATOMIC | BPF_H /* BPF_PROBE_HEAP */:
+		{
+			int mode = BPF_MODE(insn->code);
+			int size = BPF_SIZE(insn->code);
+
+			if (size == BPF_B || size == BPF_H) {
+				mode |= BPF_PROBE_HEAP;
+				size = (size == BPF_B) ? BPF_W : BPF_DW;
+			}
+
+			// Use destination by forming the correct pointer,
+			// restore after atomic operation.  This is done for
+			// base SFI.
+			if (mode == (BPF_ATOMIC | BPF_PROBE_HEAP) &&
+			    (bpf_prog->aux->heap_sfi_mode == BPF_HEAP_SFI_BASE ||
+			     bpf_prog->aux->heap_sfi_mode == BPF_HEAP_SFI_BASE_PERF)) {
+				// dst |= R12
+				maybe_emit_mod(&prog, dst_reg, X86_REG_R12, true);
+				b2 = simple_alu_opcodes[BPF_OR];
+				EMIT2(b2, add_2reg(0xC0, dst_reg, X86_REG_R12));
+			}
+
 			if (insn->imm == (BPF_AND | BPF_FETCH) ||
 			    insn->imm == (BPF_OR | BPF_FETCH) ||
 			    insn->imm == (BPF_XOR | BPF_FETCH)) {
-				bool is64 = BPF_SIZE(insn->code) == BPF_DW;
+				bool is64 = size == BPF_DW;
 				u32 real_src_reg = src_reg;
 				u32 real_dst_reg = dst_reg;
 				u8 *branch_target;
@@ -1946,7 +2336,7 @@ populate_extable:
 
 				branch_target = prog;
 				/* Load old value */
-				emit_ldx(&prog, BPF_SIZE(insn->code),
+				emit_ldx(&prog, size,
 					 BPF_REG_0, real_dst_reg, insn->off);
 				/*
 				 * Perform the (commutative) operation locally,
@@ -1960,7 +2350,7 @@ populate_extable:
 				err = emit_atomic(&prog, BPF_CMPXCHG,
 						  real_dst_reg, AUX_REG,
 						  insn->off,
-						  BPF_SIZE(insn->code));
+						  size);
 				if (WARN_ON(err))
 					return err;
 				/*
@@ -1976,10 +2366,20 @@ populate_extable:
 			}
 
 			err = emit_atomic(&prog, insn->imm, dst_reg, src_reg,
-					  insn->off, BPF_SIZE(insn->code));
+					  insn->off, size);
 			if (err)
 				return err;
+			// Restore dst to offset
+			if (mode == (BPF_ATOMIC | BPF_PROBE_HEAP) &&
+			    (bpf_prog->aux->heap_sfi_mode == BPF_HEAP_SFI_BASE ||
+			     bpf_prog->aux->heap_sfi_mode == BPF_HEAP_SFI_BASE_PERF)) {
+				// and dst, kmask
+				maybe_emit_mod(&prog, dst_reg, X86_REG_R9, true);
+				b2 = simple_alu_opcodes[BPF_AND];
+				EMIT2(b2, add_2reg(0xC0, dst_reg, X86_REG_R9));
+			}
 			break;
+		}
 
 			/* call */
 		case BPF_JMP | BPF_CALL: {
@@ -1998,6 +2398,13 @@ populate_extable:
 			}
 			if (emit_call(&prog, func, image + addrs[i - 1] + offs))
 				return -EINVAL;
+			// r9 may be clobbered by the call, restore it back
+			if (bpf_prog->aux->heap) {
+				// movq r9, kmask
+				emit_mov_imm64(&prog, X86_REG_R9,
+					       bpf_prog->aux->heap->kernel_addr_mask >> 32,
+					       (u32)bpf_prog->aux->heap->kernel_addr_mask);
+			}
 			break;
 		}
 
@@ -2270,7 +2677,7 @@ emit_jmp:
 					pop_r12(&prog);
 			} else {
 				pop_callee_regs(&prog, callee_regs_used);
-				if (arena_vm_start)
+				if (arena_vm_start || bpf_prog->aux->heap)
 					pop_r12(&prog);
 			}
 			EMIT1(0xC9);         /* leave */

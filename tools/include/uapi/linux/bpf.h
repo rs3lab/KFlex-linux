@@ -1345,6 +1345,12 @@ enum bpf_addr_space_cast {
 	BPF_ADDR_SPACE_CAST = 1,
 };
 
+enum bpf_heap_sfi_insn {
+	BPF_HEAP_SFI_GUARD = 2,
+	BPF_HEAP_SFI_TRANS_K2U = 3,
+	BPF_HEAP_SFI_GUARD_TRANS_U2K = 4,
+};
+
 /* flags for BPF_MAP_UPDATE_ELEM command */
 enum {
 	BPF_ANY		= 0, /* create new element or update existing */
