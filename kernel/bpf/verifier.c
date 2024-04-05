@@ -14823,6 +14823,17 @@ static int check_alu_op(struct bpf_verifier_env *env, struct bpf_insn *insn)
 					return -EINVAL;
 				}
 			} else if (insn->off == BPF_ADDR_SPACE_CAST) {
+				// TODO(kkd): Hack until LLVM supports
+				// heap_guard and heap_guard_trans insns
+				if (insn->imm == 2 || insn->imm == 3) {
+					insn->off = insn->imm;
+					insn->imm = 0;
+					if (!env->prog->aux->heap) {
+						verbose(env, "heap guard instructions can be used in program with heap\n");
+						return -EINVAL;
+					}
+					goto done;
+				}
 				if (insn->imm != 1 && insn->imm != 1u << 16) {
 					verbose(env, "addr_space_cast insn can only convert between address space 1 and 0\n");
 					return -EINVAL;
@@ -14831,6 +14842,10 @@ static int check_alu_op(struct bpf_verifier_env *env, struct bpf_insn *insn)
 					verbose(env, "addr_space_cast insn can only be used in a program that has an associated arena\n");
 					return -EINVAL;
 				}
+				done:;
+			} else if (insn->off == BPF_HEAP_SFI_GUARD || insn->off == BPF_HEAP_SFI_GUARD_TRANS_U2K) {
+				// Nothing, just make sure not to error when
+				// seeing it again.
 			} else {
 				if ((insn->off != 0 && insn->off != 8 && insn->off != 16 &&
 				     insn->off != 32) || insn->imm) {
@@ -14860,7 +14875,7 @@ static int check_alu_op(struct bpf_verifier_env *env, struct bpf_insn *insn)
 			struct bpf_reg_state *dst_reg = regs + insn->dst_reg;
 
 			if (BPF_CLASS(insn->code) == BPF_ALU64) {
-				if (insn->imm) {
+				if (insn->off == BPF_ADDR_SPACE_CAST && insn->imm) {
 					/* off == BPF_ADDR_SPACE_CAST */
 					mark_reg_unknown(env, regs, insn->dst_reg);
 					if (insn->imm == 1) { /* cast from as(1) to as(0) */
@@ -14868,6 +14883,24 @@ static int check_alu_op(struct bpf_verifier_env *env, struct bpf_insn *insn)
 						/* PTR_TO_ARENA is 32-bit */
 						dst_reg->subreg_def = env->insn_idx + 1;
 					}
+				} else if (insn->off == BPF_HEAP_SFI_GUARD || insn->off == BPF_HEAP_SFI_GUARD_TRANS_U2K) {
+					u32 btf_id = type_is_heap(dst_reg->type) ? dst_reg->btf_id : 0;
+					struct btf *prog_btf = env->prog->aux->btf;
+
+					if (!prog_btf) {
+						verbose(env, "heap guard insn cannot be used without prog BTF\n");
+						return -EINVAL;
+					}
+					if (insn->dst_reg != insn->src_reg) {
+						verbose(env, "heap guard insn must guard same reg\n");
+						return -EINVAL;
+					}
+					// Mark as a fresh trusted heap pointer
+					// of same type as earlier, or void if
+					// casted from invalid garbage.
+					mark_btf_ld_reg(env, cur_regs(env), insn->dst_reg, PTR_TO_BTF_ID, prog_btf, btf_id, MEM_HEAP);
+					// No need to add insn fixups, as JIT
+					// will process these instructions.
 				} else if (insn->off == 0) {
 					/* case: R1 = R2
 					 * copy register state to dest reg

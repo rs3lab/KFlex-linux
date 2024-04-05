@@ -1347,8 +1347,8 @@ enum bpf_addr_space_cast {
 
 enum bpf_heap_sfi_insn {
 	BPF_HEAP_SFI_GUARD = 2,
-	BPF_HEAP_SFI_TRANS_K2U = 3,
-	BPF_HEAP_SFI_GUARD_TRANS_U2K = 4,
+	BPF_HEAP_SFI_GUARD_TRANS_U2K = 3,
+	BPF_HEAP_SFI_TRANS_K2U = 4,
 };
 
 /* flags for BPF_MAP_UPDATE_ELEM command */
