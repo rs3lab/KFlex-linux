@@ -20780,7 +20780,11 @@ static int do_misc_fixups(struct bpf_verifier_env *env)
 	}
 
 	for (i = 0; i < insn_cnt;) {
-		if (insn->code == (BPF_ALU64 | BPF_MOV | BPF_X) && insn->imm) {
+		aux = &env->insn_aux_data[i + delta];
+
+		// Check off before entering so we don't deref arena for heap
+		// guard insns.
+		if (insn->code == (BPF_ALU64 | BPF_MOV | BPF_X) && insn->off == BPF_ADDR_SPACE_CAST && insn->imm) {
 			if ((insn->off == BPF_ADDR_SPACE_CAST && insn->imm == 1) ||
 			    (((struct bpf_map *)env->prog->aux->arena)->map_flags & BPF_F_NO_USER_CONV)) {
 				/* convert to 32-bit mov that clears upper 32-bit */
@@ -20795,6 +20799,71 @@ static int do_misc_fixups(struct bpf_verifier_env *env)
 		if (env->insn_aux_data[i + delta].needs_zext)
 			/* Convert BPF_CLASS(insn->code) == BPF_ALU64 to 32-bit ALU */
 			insn->code = BPF_ALU | BPF_OP(insn->code) | BPF_SRC(insn->code);
+
+		if (aux->hptr_insn_fixup) {
+			int fixup = aux->hptr_insn_fixup;
+			int dst = aux->hptr_insn_fixup_dst_reg;
+			int src = aux->hptr_insn_fixup_src_reg;
+			int grd = aux->hptr_insn_fixup_grd_reg;
+
+			aux->hptr_insn_fixup = 0;
+			// Emit guard instruction
+			if (fixup & HPTR_FIXUP_GUARD) {
+				struct bpf_insn patch[] = {
+					BPF_HEAP_GUARD_REG(grd),
+					*insn,
+				};
+
+				cnt = ARRAY_SIZE(patch);
+				new_prog = bpf_patch_insn_data(env, i + delta, patch, cnt);
+				if (!new_prog)
+					return -ENOMEM;
+
+				delta    += cnt - 1;
+				env->prog = prog = new_prog;
+				insn      = new_prog->insnsi + i + delta;
+			}
+			// Emit translation for source register
+			if (fixup & HPTR_FIXUP_TRANS_K2U) {
+				struct bpf_insn patch[] = {
+					BPF_HEAP_TRANS_K2U_REG(BPF_REG_AX, src),
+					*insn,
+				};
+
+				// Instruction must use translated AX as source
+				// register.
+				patch[1].src_reg = BPF_REG_AX;
+
+				cnt = ARRAY_SIZE(patch);
+				new_prog = bpf_patch_insn_data(env, i + delta, patch, cnt);
+				if (!new_prog)
+					return -ENOMEM;
+
+				delta    += cnt - 1;
+				env->prog = prog = new_prog;
+				insn      = new_prog->insnsi + i + delta;
+			}
+			// Emit guard + translation for destination register
+			if (fixup & HPTR_FIXUP_GUARD_TRANS_U2K) {
+				// We only deal with 8-byte instructions for
+				// fixups, no ldimm64, etc.
+				struct bpf_insn patch[] = {
+					*insn,
+					BPF_HEAP_GUARD_TRANS_U2K_REG(dst),
+				};
+
+				cnt = ARRAY_SIZE(patch);
+				new_prog = bpf_patch_insn_data(env, i + delta, patch, cnt);
+				if (!new_prog)
+					return -ENOMEM;
+
+				delta    += cnt - 1;
+				env->prog = prog = new_prog;
+				insn      = new_prog->insnsi + i + delta;
+			}
+			// All done, goto next
+			goto next_insn;
+		}
 
 		/* Make divide-by-zero exceptions impossible. */
 		if (insn->code == (BPF_ALU64 | BPF_MOD | BPF_X) ||
