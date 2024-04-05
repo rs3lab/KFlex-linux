@@ -698,6 +698,12 @@ enum bpf_type_flag {
 	/* DYNPTR points to xdp_buff */
 	DYNPTR_TYPE_XDP		= BIT(16 + BPF_BASE_TYPE_BITS),
 
+	/* MEM points to a heap region. */
+	MEM_HEAP		= BIT(17 + BPF_BASE_TYPE_BITS),
+
+	/* MEM points to a heap region, but must be guarded before use. */
+	MEM_HEAP_UNTRUSTED	= BIT(18 + BPF_BASE_TYPE_BITS),
+
 	__BPF_TYPE_FLAG_MAX,
 	__BPF_TYPE_LAST_FLAG	= __BPF_TYPE_FLAG_MAX - 1,
 };

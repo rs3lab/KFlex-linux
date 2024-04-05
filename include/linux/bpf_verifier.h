@@ -95,6 +95,7 @@ struct bpf_reg_state {
 		struct {
 			struct btf *btf;
 			u32 btf_id;
+			s32 heap_off;
 		};
 
 		struct { /* for PTR_TO_MEM | PTR_TO_MEM_OR_NULL */
@@ -574,6 +575,14 @@ struct bpf_insn_aux_data {
 	 * accepts callback function as a parameter.
 	 */
 	bool calls_callback;
+	enum hptr_insn_fixup {
+		HPTR_FIXUP_GUARD		= (1 << 0),
+		HPTR_FIXUP_TRANS_K2U		= (1 << 1),
+		HPTR_FIXUP_GUARD_TRANS_U2K	= (1 << 2)
+	} hptr_insn_fixup;
+	int hptr_insn_fixup_dst_reg;
+	int hptr_insn_fixup_src_reg;
+	int hptr_insn_fixup_grd_reg;
 };
 
 #define MAX_USED_MAPS 64 /* max number of maps accessed by one eBPF program */

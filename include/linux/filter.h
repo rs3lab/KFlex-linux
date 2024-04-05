@@ -75,6 +75,12 @@ struct ctl_table_header;
 /* unused opcode to mark special load instruction. Same as BPF_MSH */
 #define BPF_PROBE_MEM32	0xa0
 
+/* unused opcode to mark special load instruction. Same as BPF_CALL_ARGS */
+#define BPF_PROBE_HEAP  0xe0
+
+/* unused opcode to mark special load instruction. */
+#define BPF_PROBE_HEAPSX  0xc0
+
 /* unused opcode to mark call to interpreter with arguments */
 #define BPF_CALL_ARGS	0xe0
 

@@ -6441,6 +6441,143 @@ static bool type_is_trusted(struct bpf_verifier_env *env,
 	return btf_nested_type_is_trusted(&env->log, reg, field_name, btf_id, "__safe_trusted");
 }
 
+static bool type_is_heap(u32 type)
+{
+	return type & (MEM_HEAP | MEM_HEAP_UNTRUSTED);
+}
+
+static int check_ptr_to_heap_access(struct bpf_verifier_env *env,
+				    struct bpf_reg_state *regs,
+				    int regno, int off, int size,
+				    enum bpf_access_type atype,
+				    int value_regno)
+{
+	struct bpf_reg_state *reg = regs + regno;
+	struct bpf_insn_aux_data *aux = &env->insn_aux_data[env->insn_idx];
+	const struct btf_type *t = btf_type_by_id(reg->btf, reg->btf_id);
+	const char *tname = btf_name_by_offset(reg->btf, t->name_off);
+	struct bpf_insn *insn = &env->prog->insnsi[env->insn_idx];
+	u32 heap_sfi_mode = env->prog->aux->heap_sfi_mode;
+	struct bpf_map *heap = env->prog->aux->heap;
+	const char *field_name = NULL;
+	enum bpf_type_flag flag = 0;
+	bool skip_type_walk = false;
+	u32 btf_id = 0;
+	int ret;
+
+	if (!heap) {
+		verbose(env, "cannot use heap pointer without associated heap\n");
+		return -EINVAL;
+	}
+	if (!env->allow_ptr_leaks) {
+		verbose(env,
+			"'struct %s' access is allowed only to CAP_PERFMON and CAP_SYS_ADMIN\n",
+			tname);
+		return -EPERM;
+	}
+	if (reg->btf != env->prog->aux->btf) {
+		verbose(env, "heap pointer access only allowed in prog BTF types\n");
+		return -EINVAL;
+	}
+
+	// heap_off has reg->off accumulated, but not insn->off.
+	// TODO(kkd): heap_off + insn->off + size > < mark untrusted
+	// //////
+
+	// If our offset is negative, we don't know the type that we'll access.
+	// Just mark result as unknown.
+	if (off < 0) {
+		if (!btf_type_is_void(t)) {
+			verbose(env,
+				"R%d is ptr_%s invalid negative access: off=%d\n",
+				regno, tname, off);
+			return -EACCES;
+		}
+		skip_type_walk = true;
+	}
+
+	// If we have a unknown offset, what we read is unknown, and what we
+	// access is potentially bad. Let's guard and then mark result as
+	// unknown.
+	// TODO(kkd): Optimize for reg->var_off.value?
+	if (!tnum_is_const(reg->var_off) || reg->var_off.value) {
+		if (!WARN_ON_ONCE(reg->type != (PTR_TO_BTF_ID | MEM_HEAP_UNTRUSTED))) {
+			reg->type &= ~MEM_HEAP;
+			reg->type |= MEM_HEAP_UNTRUSTED;
+		}
+		skip_type_walk = true;
+	}
+
+	// Sanitize before access
+	if (reg->type & MEM_HEAP_UNTRUSTED) {
+		// Don't insert guard in performance mode, as reads are
+		// harmless and we ensure abort on fault.
+		if (atype == BPF_WRITE || (atype == BPF_READ &&
+		    (heap_sfi_mode != BPF_HEAP_SFI_SHFT_PERF &&
+		     heap_sfi_mode != BPF_HEAP_SFI_BITM_PERF &&
+		     heap_sfi_mode != BPF_HEAP_SFI_BASE_PERF))) {
+			aux->hptr_insn_fixup |= HPTR_FIXUP_GUARD;
+			// regno is the reg on which the access will occur.
+			// Insert a guard before emitting any subsequent instructions.
+			aux->hptr_insn_fixup_grd_reg = regno;
+			// Since we guarded the pointer, let's mark it trusted
+			reg->type = PTR_TO_BTF_ID | MEM_HEAP;
+			reg->heap_off = 0;
+		}
+	}
+
+	if (btf_type_is_void(t) || skip_type_walk)
+		ret = SCALAR_VALUE;
+	else
+		ret = btf_struct_access(&env->log, reg, off, size, atype, &btf_id, &flag, &field_name);
+	if (ret < 0)
+		return ret;
+
+	if (ret != PTR_TO_BTF_ID) {
+		/* just mark; */
+	} else {
+		/* We will guard whatever we load */
+		flag = MEM_HEAP;
+	}
+
+	// For atomics, we will see a READ and WRITE, with READ as val_reg >= 0
+	if (atype == BPF_READ && value_regno >= 0) {
+		// If we loaded a pointer, guard and translate it to heap domain.
+		if (ret == PTR_TO_BTF_ID) {
+			// We skip guard/trans, so mark untrusted.
+			flag = MEM_HEAP_UNTRUSTED;
+			// Guard dst but only if translation is needed,
+			// otherwise we can mark as untrusted and emit guards on
+			// first store. Loads can be untranslated and safe.
+			// We also need a guard (not translation) for base SFI,
+			// as upper bits need to be eliminated. u2k trans is
+			// already a single AND for this mode, so just rely on
+			// it.
+			if ((heap->map_flags & BPF_F_HEAP_TRANS) ||
+			    (heap_sfi_mode == BPF_HEAP_SFI_BASE ||
+			     heap_sfi_mode == BPF_HEAP_SFI_BASE_PERF)) {
+				aux->hptr_insn_fixup |= HPTR_FIXUP_GUARD_TRANS_U2K;
+				aux->hptr_insn_fixup_dst_reg = value_regno;
+				flag = MEM_HEAP;
+			}
+		}
+		mark_btf_ld_reg(env, regs, value_regno, ret, reg->btf, btf_id, flag);
+	} else if (atype == BPF_WRITE && (heap->map_flags & BPF_F_HEAP_TRANS) && ret == PTR_TO_BTF_ID) {
+		// We need to translate src_reg into user pointer if translation
+		// is needed, i.e. if we are storing a pointer into a pointer
+		// field.
+		if (type_is_heap(cur_regs(env)[insn->src_reg].type)) {
+			aux->hptr_insn_fixup |= HPTR_FIXUP_TRANS_K2U;
+			// This is ok for atomics, as loaded value for cmpxchg
+			// goes to R0, otherwise src_reg is the one being
+			// cmpxchg'd.
+			aux->hptr_insn_fixup_src_reg = insn->src_reg;
+		}
+	}
+
+	return 0;
+}
+
 static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 				   struct bpf_reg_state *regs,
 				   int regno, int off, int size,
@@ -6940,8 +7077,10 @@ static int check_mem_access(struct bpf_verifier_env *env, int insn_idx, u32 regn
 			mark_reg_unknown(env, regs, value_regno);
 	} else if (base_type(reg->type) == PTR_TO_BTF_ID &&
 		   !type_may_be_null(reg->type)) {
-		err = check_ptr_to_btf_access(env, regs, regno, off, size, t,
-					      value_regno);
+		if (type_is_heap(reg->type))
+			err = check_ptr_to_heap_access(env, regs, regno, off, size, t, value_regno);
+		else
+			err = check_ptr_to_btf_access(env, regs, regno, off, size, t, value_regno);
 	} else if (reg->type == CONST_PTR_TO_MAP) {
 		err = check_ptr_to_map_access(env, regs, regno, off, size, t,
 					      value_regno);
@@ -7050,6 +7189,14 @@ static int check_atomic(struct bpf_verifier_env *env, int insn_idx, struct bpf_i
 			insn->dst_reg,
 			reg_type_str(env, reg_state(env, insn->dst_reg)->type));
 		return -EACCES;
+	}
+
+	if (type_is_heap(cur_regs(env)[insn->dst_reg].type) &&
+	    type_is_heap(cur_regs(env)[insn->src_reg].type)) {
+		if (insn->imm != BPF_XCHG && insn->imm != BPF_CMPXCHG) {
+			verbose(env, "Only xchg and cmpxchg permitted with heap ptr as dst and src\n");
+			return -EINVAL;
+		}
 	}
 
 	if (insn->imm & BPF_FETCH) {
@@ -7314,6 +7461,10 @@ static int check_helper_mem_access(struct bpf_verifier_env *env, int regno,
 				regno, reg->off, access_size,
 				zero_size_allowed, ACCESS_HELPER, meta);
 	case PTR_TO_BTF_ID:
+		if (type_is_heap(reg->type)) {
+			verbose(env, "cannot read heap memory from BPF helpers\n");
+			return -EACCES;
+		}
 		return check_ptr_to_btf_access(env, regs, regno, reg->off,
 					       access_size, BPF_READ, -1);
 	case PTR_TO_CTX:
@@ -13501,6 +13652,32 @@ static int adjust_ptr_min_max_vals(struct bpf_verifier_env *env,
 			dst_reg->var_off = ptr_reg->var_off;
 			dst_reg->off = ptr_reg->off + smin_val;
 			dst_reg->raw = ptr_reg->raw;
+
+			// Checks on pointer increment for heaps
+			if (type_is_heap(ptr_reg->type)) {
+				int type = ptr_reg->type;
+				s64 heap_off = ptr_reg->heap_off;
+
+				// If known offset doesn't overflow, check if it
+				// lies in guard pages. If not, ensure we emit
+				// guards before next access.
+				if (heap_off + smin_val == (s64)(s32)(heap_off + smin_val)) {
+					// Going out of domain, guard!
+					if ((heap_off + smin_val < S16_MIN) || (heap_off + smin_val >= S16_MAX - 8)) {
+						type = PTR_TO_BTF_ID | MEM_HEAP_UNTRUSTED;
+						heap_off = 0;
+					}
+					// All ok otherwise, just add to
+					// heap_off. Doesn't overflow.
+					heap_off += smin_val;
+				} else {
+					// Overflow, guard!
+					type = PTR_TO_BTF_ID | MEM_HEAP_UNTRUSTED;
+					heap_off = 0;
+				}
+				dst_reg->type = type;
+				dst_reg->heap_off = heap_off;
+			}
 			break;
 		}
 		/* A new variable offset is created.  Note that off_reg->off
@@ -13536,6 +13713,12 @@ static int adjust_ptr_min_max_vals(struct bpf_verifier_env *env,
 			/* something was added to pkt_ptr, set range to zero */
 			memset(&dst_reg->raw, 0, sizeof(dst_reg->raw));
 		}
+
+		// Variable offset added, I DON'T KNOW WHERE THE FUCK I AM NOW
+		if (type_is_heap(ptr_reg->type)) {
+			dst_reg->type = PTR_TO_BTF_ID | MEM_HEAP_UNTRUSTED;
+			dst_reg->heap_off = 0;
+		}
 		break;
 	case BPF_SUB:
 		if (dst_reg == off_reg) {
@@ -13564,6 +13747,32 @@ static int adjust_ptr_min_max_vals(struct bpf_verifier_env *env,
 			dst_reg->id = ptr_reg->id;
 			dst_reg->off = ptr_reg->off - smin_val;
 			dst_reg->raw = ptr_reg->raw;
+
+			// Checks on pointer decrement for heaps
+			if (type_is_heap(ptr_reg->type)) {
+				int type = ptr_reg->type;
+				s64 heap_off = ptr_reg->heap_off;
+
+				// If known offset doesn't overflow, check if it
+				// lies in guard pages. If not, ensure we emit
+				// guards before next access.
+				if (heap_off - smin_val == (s64)(s32)(heap_off - smin_val)) {
+					// Going out of domain, guard!
+					if ((heap_off - smin_val < S16_MIN) || (heap_off - smin_val >= S16_MAX - 8)) {
+						type = PTR_TO_BTF_ID | MEM_HEAP_UNTRUSTED;
+						heap_off = 0;
+					}
+					// All ok otherwise, just add to
+					// heap_off. Doesn't overflow.
+					heap_off -= smin_val;
+				} else {
+					// Overflow, guard!
+					type = PTR_TO_BTF_ID | MEM_HEAP_UNTRUSTED;
+					heap_off = 0;
+				}
+				dst_reg->type = type;
+				dst_reg->heap_off = heap_off;
+			}
 			break;
 		}
 		/* A new variable offset is created.  If the subtrahend is known
@@ -13595,6 +13804,12 @@ static int adjust_ptr_min_max_vals(struct bpf_verifier_env *env,
 			/* something was added to pkt_ptr, set range to zero */
 			if (smin_val < 0)
 				memset(&dst_reg->raw, 0, sizeof(dst_reg->raw));
+		}
+
+		// Variable offset added, I DON'T KNOW WHERE THE FUCK I AM NOW
+		if (type_is_heap(ptr_reg->type)) {
+			dst_reg->type = PTR_TO_BTF_ID | MEM_HEAP_UNTRUSTED;
+			dst_reg->heap_off = 0;
 		}
 		break;
 	case BPF_AND:
@@ -18126,7 +18341,9 @@ static int save_aux_ptr_type(struct bpf_verifier_env *env, enum bpf_reg_type typ
 		 */
 		if (allow_trust_missmatch &&
 		    base_type(type) == PTR_TO_BTF_ID &&
-		    base_type(*prev_type) == PTR_TO_BTF_ID) {
+		    base_type(*prev_type) == PTR_TO_BTF_ID &&
+		    // MEM_HEAP shouldn't be involved in mismatch
+		    !((type | *prev_type) & (MEM_HEAP | MEM_HEAP_UNTRUSTED))) {
 			/*
 			 * Have to support a use case when one path through
 			 * the program yields TRUSTED pointer while another
@@ -19655,6 +19872,27 @@ static int convert_ctx_accesses(struct bpf_verifier_env *env)
 			insn->code = BPF_CLASS(insn->code) | BPF_PROBE_MEM32 | BPF_SIZE(insn->code);
 			env->prog->aux->num_exentries++;
 			continue;
+		case PTR_TO_BTF_ID | MEM_HEAP:
+		case PTR_TO_BTF_ID | MEM_HEAP_UNTRUSTED:
+			if (BPF_CLASS(insn->code) == BPF_LDX) {
+				if (BPF_MODE(insn->code) == BPF_MEM)
+					insn->code = BPF_LDX | BPF_PROBE_HEAP |
+						     BPF_SIZE((insn)->code);
+				else
+					insn->code = BPF_LDX | BPF_PROBE_HEAPSX |
+						     BPF_SIZE((insn)->code);
+			} else if (BPF_CLASS(insn->code) == BPF_STX || BPF_CLASS(insn->code) == BPF_ST) {
+				if (BPF_MODE(insn->code) == BPF_ATOMIC) {
+					int size = BPF_SIZE(insn->code) == BPF_DW ? BPF_H : BPF_B;
+					// BPF_B and BPF_H are interpreted by
+					// JIT as PROBE_HEAP atomics.
+					insn->code = BPF_STX | BPF_ATOMIC | size;
+				} else if (BPF_CLASS(insn->code) == BPF_STX) {
+					insn->code = BPF_STX | BPF_PROBE_HEAP | BPF_SIZE(insn->code);
+				} else if (BPF_CLASS(insn->code) == BPF_ST) {
+					insn->code = BPF_ST | BPF_PROBE_HEAP | BPF_SIZE(insn->code);
+				}
+			}
 		default:
 			continue;
 		}
