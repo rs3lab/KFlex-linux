@@ -561,6 +561,9 @@ void btf_record_free(struct btf_record *rec)
 				module_put(rec->fields[i].kptr.module);
 			btf_put(rec->fields[i].kptr.btf);
 			break;
+		case BPF_HPTR:
+			btf_put(rec->fields[i].hptr.btf);
+			break;
 		case BPF_LIST_HEAD:
 		case BPF_LIST_NODE:
 		case BPF_RB_ROOT:
@@ -617,6 +620,7 @@ struct btf_record *btf_record_dup(const struct btf_record *rec)
 		case BPF_SPIN_LOCK:
 		case BPF_TIMER:
 		case BPF_REFCOUNT:
+		case BPF_HPTR:
 			/* Nothing to acquire */
 			break;
 		default:
@@ -722,6 +726,7 @@ void bpf_obj_free_fields(const struct btf_record *rec, void *obj)
 		case BPF_LIST_NODE:
 		case BPF_RB_NODE:
 		case BPF_REFCOUNT:
+		case BPF_HPTR:
 			break;
 		default:
 			WARN_ON_ONCE(1);
@@ -927,8 +932,12 @@ static int bpf_map_mmap(struct file *filp, struct vm_area_struct *vma)
 	struct bpf_map *map = filp->private_data;
 	int err;
 
-	if (!map->ops->map_mmap || !IS_ERR_OR_NULL(map->record))
-		return -ENOTSUPP;
+	if (!map->ops->map_mmap || !IS_ERR_OR_NULL(map->record)) {
+		/* We can mmap when we have uptr field in a map */
+		if (!IS_ERR_OR_NULL(map->record) && map->record->field_mask != BPF_HPTR) {
+			return -ENOTSUPP;
+		}
+	}
 
 	if (!(vma->vm_flags & VM_SHARED))
 		return -EINVAL;
@@ -1094,7 +1103,7 @@ static int map_check_btf(struct bpf_map *map, struct bpf_token *token,
 
 	map->record = btf_parse_fields(btf, value_type,
 				       BPF_SPIN_LOCK | BPF_TIMER | BPF_KPTR | BPF_LIST_HEAD |
-				       BPF_RB_ROOT | BPF_REFCOUNT,
+				       BPF_RB_ROOT | BPF_REFCOUNT | BPF_HPTR,
 				       map->value_size);
 	if (!IS_ERR_OR_NULL(map->record)) {
 		int i;
@@ -1157,6 +1166,9 @@ static int map_check_btf(struct bpf_map *map, struct bpf_token *token,
 					ret = -EOPNOTSUPP;
 					goto free_map_tab;
 				}
+				break;
+			case BPF_HPTR:
+				/* Works in any kind of map type */
 				break;
 			default:
 				/* Fail if map_type checks are missing for a field type */

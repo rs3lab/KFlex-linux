@@ -5206,6 +5206,11 @@ static int check_ptr_off_reg(struct bpf_verifier_env *env,
 	return __check_ptr_off_reg(env, reg, regno, false);
 }
 
+static bool type_is_heap(u32 type)
+{
+	return type & (MEM_HEAP | MEM_HEAP_UNTRUSTED);
+}
+
 static int map_kptr_match_type(struct bpf_verifier_env *env,
 			       struct btf_field *kptr_field,
 			       struct bpf_reg_state *reg, u32 regno)
@@ -5220,6 +5225,8 @@ static int map_kptr_match_type(struct bpf_verifier_env *env,
 		/* Only unreferenced case accepts untrusted pointers */
 		if (kptr_field->type == BPF_KPTR_UNREF)
 			perm_flags |= PTR_UNTRUSTED;
+	} else if (kptr_field->type == BPF_HPTR) {
+		perm_flags = MEM_HEAP | MEM_HEAP_UNTRUSTED;
 	} else {
 		perm_flags = PTR_MAYBE_NULL | MEM_ALLOC;
 		if (kptr_field->type == BPF_KPTR_PERCPU)
@@ -5228,6 +5235,10 @@ static int map_kptr_match_type(struct bpf_verifier_env *env,
 
 	if (base_type(reg->type) != PTR_TO_BTF_ID || (type_flag(reg->type) & ~perm_flags))
 		goto bad_type;
+
+	// For hptr, not type match or offset checks needed.
+	if (type_is_heap(reg->type))
+		return 0;
 
 	/* We need to verify reg->type and reg->btf, before accessing reg->btf */
 	reg_name = btf_type_name(reg->btf, reg->btf_id);
@@ -5416,6 +5427,78 @@ static int check_map_kptr_access(struct bpf_verifier_env *env, u32 regno,
 	return 0;
 }
 
+static int check_map_hptr_access(struct bpf_verifier_env *env, u32 regno,
+				 int value_regno, int insn_idx,
+				 struct btf_field *hptr_field)
+{
+	struct bpf_insn_aux_data *aux = &env->insn_aux_data[env->insn_idx];
+	struct bpf_insn *insn = &env->prog->insnsi[insn_idx];
+	int class = BPF_CLASS(insn->code);
+	struct bpf_reg_state *val_reg;
+
+	/* Things we already checked for in check_map_access and caller:
+	 *  - Reject cases where variable offset may touch hptr
+	 *  - size of access (must be BPF_DW)
+	 *  - tnum_is_const(reg->var_off)
+	 *  - hptr_field->offset == off + reg->var_off.value
+	 */
+	/* Only BPF_[LDX,STX,ST] | BPF_[MEM, ATOMIC] | BPF_DW is supported */
+	if (BPF_MODE(insn->code) != BPF_MEM && BPF_MODE(insn->code) != BPF_ATOMIC) {
+		verbose(env, "hptr in map can only be accessed using BPF_MEM or BPF_ATOMIC instruction mode\n");
+		return -EACCES;
+	}
+
+	if (!env->prog->aux->heap) {
+		verbose(env, "hptr can only be loaded in programs with associated heap\n");
+		return -EINVAL;
+	}
+
+	if (class == BPF_LDX) {
+		if (value_regno >= 0) {
+			val_reg = reg_state(env, value_regno);
+			/* We can simply mark the value_regno receiving the pointer
+			 * value from map as PTR_TO_BTF_ID, with the correct type.
+			 */
+			mark_btf_ld_reg(env, cur_regs(env), value_regno, PTR_TO_BTF_ID, hptr_field->hptr.btf,
+					hptr_field->hptr.btf_id, MEM_HEAP_UNTRUSTED);
+			/* Mark this load as something we need to translate after the
+			 * instruction, so that we can emit translation instructions
+			 * during fixup phase.
+			 */
+			// Translate value_regno, not dst_reg, as atomics pass
+			// R0 for cmpxchg, which != dst
+			aux->hptr_insn_fixup |= HPTR_FIXUP_GUARD_TRANS_U2K;
+			aux->hptr_insn_fixup_dst_reg = value_regno;
+		}
+	} else if (class == BPF_STX) {
+		// For atomics, set value_regno since it is -1, and check if we
+		// must translate it.
+		if (BPF_MODE(insn->code) == BPF_ATOMIC)
+			value_regno = insn->src_reg;
+		val_reg = reg_state(env, value_regno);
+		// TODO(kkd): Change map_kptr_match_type's name?
+		// If a non hptr type is being stored, allow it.
+		// If not NULL value and not a hptr input, then no need to
+		// translate.
+		if (!register_is_null(val_reg) &&
+		    map_kptr_match_type(env, hptr_field, val_reg, value_regno))
+			return 0;
+		// Is it NULL?
+		if (register_is_null(val_reg))
+			return 0;
+		// Translate value_regno
+		aux->hptr_insn_fixup |= HPTR_FIXUP_TRANS_K2U;
+		aux->hptr_insn_fixup_src_reg = value_regno;
+	} else if (class == BPF_ST) {
+		// Allow whatever
+	} else {
+		// TODO(kkd): We might need support for other instruction types.
+		verbose(env, "hptr in map can only be accessed using BPF_LDX/BPF_STX/BPF_ST or atomic operations\n");
+		return -EACCES;
+	}
+	return 0;
+}
+
 /* check read/write into a map element with possible variable offset */
 static int check_map_access(struct bpf_verifier_env *env, u32 regno,
 			    int off, int size, bool zero_size_allowed,
@@ -5450,6 +5533,7 @@ static int check_map_access(struct bpf_verifier_env *env, u32 regno,
 			case BPF_KPTR_UNREF:
 			case BPF_KPTR_REF:
 			case BPF_KPTR_PERCPU:
+			case BPF_HPTR:
 				if (src != ACCESS_DIRECT) {
 					verbose(env, "kptr cannot be accessed indirectly by helper\n");
 					return -EACCES;
@@ -6441,11 +6525,6 @@ static bool type_is_trusted(struct bpf_verifier_env *env,
 	return btf_nested_type_is_trusted(&env->log, reg, field_name, btf_id, "__safe_trusted");
 }
 
-static bool type_is_heap(u32 type)
-{
-	return type & (MEM_HEAP | MEM_HEAP_UNTRUSTED);
-}
-
 static int check_ptr_to_heap_access(struct bpf_verifier_env *env,
 				    struct bpf_reg_state *regs,
 				    int regno, int off, int size,
@@ -6931,7 +7010,7 @@ static int check_mem_access(struct bpf_verifier_env *env, int insn_idx, u32 regn
 		if (value_regno >= 0)
 			mark_reg_unknown(env, regs, value_regno);
 	} else if (reg->type == PTR_TO_MAP_VALUE) {
-		struct btf_field *kptr_field = NULL;
+		struct btf_field *kptr_field = NULL, *hptr_field = NULL;
 
 		if (t == BPF_WRITE && value_regno >= 0 &&
 		    is_pointer_value(env, value_regno)) {
@@ -6944,11 +7023,16 @@ static int check_mem_access(struct bpf_verifier_env *env, int insn_idx, u32 regn
 		err = check_map_access(env, regno, off, size, false, ACCESS_DIRECT);
 		if (err)
 			return err;
-		if (tnum_is_const(reg->var_off))
+		if (tnum_is_const(reg->var_off)) {
 			kptr_field = btf_record_find(reg->map_ptr->record,
 						     off + reg->var_off.value, BPF_KPTR);
+			hptr_field = btf_record_find(reg->map_ptr->record,
+						     off + reg->var_off.value, BPF_HPTR);
+		}
 		if (kptr_field) {
 			err = check_map_kptr_access(env, regno, value_regno, insn_idx, kptr_field);
+		} else if (hptr_field) {
+			err = check_map_hptr_access(env, regno, value_regno, insn_idx, hptr_field);
 		} else if (t == BPF_READ && value_regno >= 0) {
 			struct bpf_map *map = reg->map_ptr;
 

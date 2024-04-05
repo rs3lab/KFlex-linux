@@ -202,6 +202,7 @@ enum btf_field_type {
 	BPF_GRAPH_NODE = BPF_RB_NODE | BPF_LIST_NODE,
 	BPF_GRAPH_ROOT = BPF_RB_ROOT | BPF_LIST_HEAD,
 	BPF_REFCOUNT   = (1 << 9),
+	BPF_HPTR       = (1 << 10),
 };
 
 typedef void (*btf_dtor_kfunc_t)(void *);
@@ -223,6 +224,12 @@ struct btf_field_graph_root {
 	struct btf_record *value_rec;
 };
 
+struct btf_field_hptr {
+	struct btf *btf;
+	u32 btf_id;
+	u32 map_name_off;
+};
+
 struct btf_field {
 	u32 offset;
 	u32 size;
@@ -230,6 +237,7 @@ struct btf_field {
 	union {
 		struct btf_field_kptr kptr;
 		struct btf_field_graph_root graph_root;
+		struct btf_field_hptr hptr;
 	};
 };
 
@@ -330,6 +338,8 @@ static inline const char *btf_field_type_name(enum btf_field_type type)
 		return "bpf_rb_node";
 	case BPF_REFCOUNT:
 		return "bpf_refcount";
+	case BPF_HPTR:
+		return "hptr";
 	default:
 		WARN_ON_ONCE(1);
 		return "unknown";
@@ -357,6 +367,8 @@ static inline u32 btf_field_type_size(enum btf_field_type type)
 		return sizeof(struct bpf_rb_node);
 	case BPF_REFCOUNT:
 		return sizeof(struct bpf_refcount);
+	case BPF_HPTR:
+		return sizeof(u64);
 	default:
 		WARN_ON_ONCE(1);
 		return 0;
@@ -384,6 +396,8 @@ static inline u32 btf_field_type_align(enum btf_field_type type)
 		return __alignof__(struct bpf_rb_node);
 	case BPF_REFCOUNT:
 		return __alignof__(struct bpf_refcount);
+	case BPF_HPTR:
+		return __alignof__(u64);
 	default:
 		WARN_ON_ONCE(1);
 		return 0;
@@ -412,6 +426,7 @@ static inline void bpf_obj_init_field(const struct btf_field *field, void *addr)
 	case BPF_KPTR_UNREF:
 	case BPF_KPTR_REF:
 	case BPF_KPTR_PERCPU:
+	case BPF_HPTR:
 		break;
 	default:
 		WARN_ON_ONCE(1);

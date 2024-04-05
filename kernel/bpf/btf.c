@@ -3297,6 +3297,10 @@ struct btf_field_info {
 			const char *node_name;
 			u32 value_btf_id;
 		} graph_root;
+		struct {
+			u32 type_id;
+			u32 map_name_off;
+		} hptr;
 	};
 };
 
@@ -3435,6 +3439,46 @@ btf_find_graph_root(const struct btf *btf, const struct btf_type *pt,
 	return BTF_FIELD_FOUND;
 }
 
+static int btf_find_hptr(const struct btf *btf, const struct btf_type *t,
+			 u32 off, int sz, struct btf_field_info *info)
+{
+	int len = sizeof("hptr:") - 1;
+	enum btf_field_type type;
+	u32 name_off, res_id;
+
+	/* Permit modifiers on the pointer itself */
+	if (btf_type_is_volatile(t))
+		t = btf_type_by_id(btf, t->type);
+	/* For PTR, sz is always == 8 */
+	if (!btf_type_is_ptr(t))
+		return BTF_FIELD_IGNORE;
+	t = btf_type_by_id(btf, t->type);
+
+	if (!btf_type_is_type_tag(t))
+		return BTF_FIELD_IGNORE;
+	/* Reject extra tags */
+	if (btf_type_is_type_tag(btf_type_by_id(btf, t->type)))
+		return -EINVAL;
+	if (!strncmp("hptr:", __btf_name_by_offset(btf, t->name_off), len))
+		type = BPF_HPTR;
+	else
+		return -EINVAL;
+	name_off = t->name_off + len;
+	/* Get the base type */
+	t = btf_type_skip_modifiers(btf, t->type, &res_id);
+	/* Only pointer to struct is allowed */
+	if (!__btf_type_is_struct(t))
+		return -EINVAL;
+
+	info->type = type;
+	info->off = off;
+	info->hptr.map_name_off = name_off;
+	if (str_is_empty(__btf_name_by_offset(btf, t->name_off + len)))
+		return -EINVAL;
+	info->hptr.type_id = res_id;
+	return BTF_FIELD_FOUND;
+}
+
 #define field_mask_test_name(field_type, field_type_str) \
 	if (field_mask & field_type && !strcmp(name, field_type_str)) { \
 		type = field_type;					\
@@ -3442,7 +3486,8 @@ btf_find_graph_root(const struct btf *btf, const struct btf_type *pt,
 	}
 
 static int btf_get_field_type(const char *name, u32 field_mask, u32 *seen_mask,
-			      int *align, int *sz)
+			      int *align, int *sz, const struct btf *btf,
+			      const struct btf_type *t)
 {
 	int type = 0;
 
@@ -3470,6 +3515,30 @@ static int btf_get_field_type(const char *name, u32 field_mask, u32 *seen_mask,
 	field_mask_test_name(BPF_RB_NODE,   "bpf_rb_node");
 	field_mask_test_name(BPF_REFCOUNT,  "bpf_refcount");
 
+	if (field_mask & BPF_HPTR) {
+		// TODO(kkd): This is the same code as the kptr stuff, maybe we
+		// can wrap it into a helper so both are in the same place.
+		// unpack_ptr_btf_type?
+		/* Permit modifiers on the pointer itself */
+		if (btf_type_is_volatile(t))
+			t = btf_type_by_id(btf, t->type);
+		/* For PTR, sz is always == 8 */
+		if (!btf_type_is_ptr(t))
+			goto kptr;
+		t = btf_type_by_id(btf, t->type);
+
+		if (!btf_type_is_type_tag(t))
+			goto kptr;
+		/* Reject extra tags */
+		if (btf_type_is_type_tag(btf_type_by_id(btf, t->type)))
+			goto kptr;
+		if (strncmp("hptr:", __btf_name_by_offset(btf, t->name_off), sizeof("hptr:") - 1))
+			goto kptr;
+		type = BPF_HPTR;
+		goto end;
+	}
+
+kptr:
 	/* Only return BPF_KPTR when all other types with matchable names fail */
 	if (field_mask & BPF_KPTR) {
 		type = BPF_KPTR_REF;
@@ -3498,7 +3567,7 @@ static int btf_find_struct_field(const struct btf *btf,
 								    member->type);
 
 		field_type = btf_get_field_type(__btf_name_by_offset(btf, member_type->name_off),
-						field_mask, &seen_mask, &align, &sz);
+						field_mask, &seen_mask, &align, &sz, btf, member_type);
 		if (field_type == 0)
 			continue;
 		if (field_type < 0)
@@ -3540,6 +3609,12 @@ static int btf_find_struct_field(const struct btf *btf,
 			if (ret < 0)
 				return ret;
 			break;
+		case BPF_HPTR:
+			ret = btf_find_hptr(btf, member_type, off, sz,
+					    idx < info_cnt ? &info[idx] : &tmp);
+			if (ret < 0)
+				return ret;
+			break;
 		default:
 			return -EFAULT;
 		}
@@ -3567,7 +3642,7 @@ static int btf_find_datasec_var(const struct btf *btf, const struct btf_type *t,
 		const struct btf_type *var_type = btf_type_by_id(btf, var->type);
 
 		field_type = btf_get_field_type(__btf_name_by_offset(btf, var_type->name_off),
-						field_mask, &seen_mask, &align, &sz);
+						field_mask, &seen_mask, &align, &sz, btf, var_type);
 		if (field_type == 0)
 			continue;
 		if (field_type < 0)
@@ -3604,6 +3679,12 @@ static int btf_find_datasec_var(const struct btf *btf, const struct btf_type *t,
 						  -1, off, sz,
 						  idx < info_cnt ? &info[idx] : &tmp,
 						  field_type);
+			if (ret < 0)
+				return ret;
+			break;
+		case BPF_HPTR:
+			ret = btf_find_hptr(btf, var_type, off, sz,
+					    idx < info_cnt ? &info[idx] : &tmp);
 			if (ret < 0)
 				return ret;
 			break;
@@ -3870,6 +3951,12 @@ struct btf_record *btf_parse_fields(const struct btf *btf, const struct btf_type
 			break;
 		case BPF_LIST_NODE:
 		case BPF_RB_NODE:
+			break;
+		case BPF_HPTR:
+			btf_get((struct btf *)btf);
+			rec->fields[i].hptr.btf = (struct btf *)btf;
+			rec->fields[i].hptr.btf_id = info_arr[i].hptr.type_id;
+			rec->fields[i].hptr.map_name_off = info_arr[i].hptr.map_name_off;
 			break;
 		default:
 			ret = -EFAULT;
