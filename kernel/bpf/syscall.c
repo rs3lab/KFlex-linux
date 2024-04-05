@@ -60,6 +60,7 @@ static DEFINE_SPINLOCK(link_idr_lock);
 
 int sysctl_unprivileged_bpf_disabled __read_mostly =
 	IS_BUILTIN(CONFIG_BPF_UNPRIV_DEFAULT_OFF) ? 2 : 0;
+int sysctl_bpf_heap_sfi_mode __read_mostly = BPF_HEAP_SFI_BASE;
 
 static const struct bpf_map_ops * const bpf_map_types[] = {
 #define BPF_PROG_TYPE(_id, _name, prog_ctx_type, kern_ctx_type)
@@ -2899,6 +2900,8 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 	err = security_bpf_prog_load(prog, attr, token);
 	if (err)
 		goto free_prog_sec;
+
+	prog->aux->heap_sfi_mode = sysctl_bpf_heap_sfi_mode;
 
 	/* run eBPF verifier */
 	err = bpf_check(&prog, attr, uattr, uattr_size);
@@ -5976,6 +5979,14 @@ static int bpf_unpriv_handler(struct ctl_table *table, int write,
 	return ret;
 }
 
+static int bpf_heap_sfi_handler(struct ctl_table *table, int write,
+				void *buffer, size_t *lenp, loff_t *ppos)\
+{
+	if (write && !capable(CAP_SYS_ADMIN))
+		return -EPERM;
+	return proc_dointvec_minmax(table, write, buffer, lenp, ppos);
+}
+
 static struct ctl_table bpf_syscall_table[] = {
 	{
 		.procname	= "unprivileged_bpf_disabled",
@@ -5991,6 +6002,15 @@ static struct ctl_table bpf_syscall_table[] = {
 		.data		= &bpf_stats_enabled_key.key,
 		.mode		= 0644,
 		.proc_handler	= bpf_stats_handler,
+	},
+	{
+		.procname	= "bpf_heap_sfi_mode",
+		.data		= &sysctl_bpf_heap_sfi_mode,
+		.maxlen		= sizeof(sysctl_bpf_heap_sfi_mode),
+		.mode		= 0644,
+		.proc_handler	= bpf_heap_sfi_handler,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_THREE,
 	},
 	{ }
 };

@@ -19850,6 +19850,7 @@ static int jit_subprogs(struct bpf_verifier_env *env)
 		func[i]->aux->linfo_idx = env->subprog_info[i].linfo_idx;
 		func[i]->aux->arena = prog->aux->arena;
 		func[i]->aux->heap = prog->aux->heap;
+		func[i]->aux->heap_sfi_mode = prog->aux->heap_sfi_mode;
 		num_exentries = 0;
 		insn = func[i]->insnsi;
 		for (j = 0; j < func[i]->len; j++, insn++) {

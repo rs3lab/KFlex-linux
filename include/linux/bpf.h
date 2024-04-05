@@ -583,6 +583,17 @@ bool bpf_map_meta_equal(const struct bpf_map *meta0,
 
 extern const struct bpf_map_ops bpf_map_offload_ops;
 
+enum bpf_heap_sfi_mode {
+	BPF_HEAP_SFI_NONE, /* No safety instrumentation. */
+	BPF_HEAP_SFI_SHFT, /* Use shift instruction + AND to steer pointer. */
+	BPF_HEAP_SFI_BITM, /* Use OR + AND to steer pointer. */
+	BPF_HEAP_SFI_BASE, /* Use OR to obtain offset, and access with base + reg encoding. */
+	/* Same as above, but with no instrumentation for read-only pointers. */
+	BPF_HEAP_SFI_SHFT_PERF,
+	BPF_HEAP_SFI_BITM_PERF,
+	BPF_HEAP_SFI_BASE_PERF,
+};
+
 /* bpf_type_flag contains a set of flags that are applicable to the values of
  * arg_type, ret_type and reg_type. For example, a pointer value may be null,
  * or a memory is read-only. We classify types into two categories: base types
@@ -1464,6 +1475,7 @@ struct bpf_prog_aux {
 	bool exception_boundary;
 	bool bpf_throw_tramp;
 	bool callee_regs_used[4];
+	enum bpf_heap_sfi_mode heap_sfi_mode;
 	struct bpf_arena *arena;
 	struct bpf_map *heap;
 	/* BTF_KIND_FUNC_PROTO for valid attach_btf_id */
@@ -2302,6 +2314,7 @@ static inline void bpf_map_dec_elem_count(struct bpf_map *map)
 }
 
 extern int sysctl_unprivileged_bpf_disabled;
+extern int sysctl_bpf_heap_sfi_mode;
 
 bool bpf_token_capable(const struct bpf_token *token, int cap);
 
