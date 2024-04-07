@@ -6613,10 +6613,26 @@ static int check_ptr_to_heap_access(struct bpf_verifier_env *env,
 		}
 	}
 
-	if (btf_type_is_void(t) || skip_type_walk)
+	if (btf_type_is_void(t) || skip_type_walk) {
 		ret = SCALAR_VALUE;
-	else
+	} else if (btf_type_is_ptr(t)) {
+		// The type we point to is another pointer.
+		// This is a special case because we want to translate stuff
+		// properly, so ensure we set ret = PTR_TO_BTF_ID for
+		// loads/stores.
+		// var_off already skips type walk, so check if we do an aligned
+		// load from pointer
+		ret = SCALAR_VALUE;
+		if (off == 0 && size == 8) {
+			ret = PTR_TO_BTF_ID;
+		}
+		if (!btf_type_skip_modifiers(reg->btf, t->type, &btf_id)) {
+			verbose(env, "reading from pointer does not yield valid type\n");
+			return -EINVAL;
+		}
+	} else {
 		ret = btf_struct_access(&env->log, reg, off, size, atype, &btf_id, &flag, &field_name);
+	}
 	if (ret < 0)
 		return ret;
 

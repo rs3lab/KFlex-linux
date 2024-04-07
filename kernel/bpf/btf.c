@@ -6707,6 +6707,14 @@ error:
 			}
 
 			stype = btf_type_skip_modifiers(btf, mtype->type, &id);
+			// Also consider pointers
+			if (btf_type_is_ptr(stype)) {
+				*next_btf_id = id;
+				*flag |= tmp_flag;
+				if (field_name)
+					*field_name = mname;
+				return WALK_PTR;
+			}
 			if (btf_type_is_struct(stype)) {
 				*next_btf_id = id;
 				*flag |= tmp_flag;
