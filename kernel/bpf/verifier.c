@@ -5488,6 +5488,9 @@ static int check_map_hptr_access(struct bpf_verifier_env *env, u32 regno,
 		// Is it NULL?
 		if (register_is_null(val_reg))
 			return 0;
+		// Only translate heap pointer
+		if (!type_is_heap(val_reg->type))
+			return 0;
 		// Translate value_regno
 		aux->hptr_insn_fixup |= HPTR_FIXUP_TRANS_K2U;
 		aux->hptr_insn_fixup_src_reg = value_regno;
@@ -7797,6 +7800,8 @@ static int process_spin_lock(struct bpf_verifier_env *env, int regno,
 			val + reg->off, rec->spin_lock_off);
 		return -EINVAL;
 	}
+	// TODO(kkd): Temporary hack to evaluate, work around later
+	return 0;
 	if (is_lock) {
 		if (cur->active_lock.ptr) {
 			verbose(env,
@@ -20377,6 +20382,9 @@ static int jit_subprogs(struct bpf_verifier_env *env)
 		func[i]->aux->linfo_idx = env->subprog_info[i].linfo_idx;
 		func[i]->aux->arena = prog->aux->arena;
 		func[i]->aux->heap = prog->aux->heap;
+		// Value of loop allowed is returned from iterator with type int
+		if (prog->aux->heap)
+			func[i]->aux->loop_allowed = (u64)&prog->aux->loop_value;
 		func[i]->aux->heap_sfi_mode = prog->aux->heap_sfi_mode;
 		num_exentries = 0;
 		insn = func[i]->insnsi;
@@ -20740,15 +20748,16 @@ static int fixup_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 		insn_buf[0] = BPF_MOV64_REG(BPF_REG_0, BPF_REG_1);
 		*cnt = 1;
 	} else if (desc->func_id == special_kfunc_list[KF_bpf_iter_loop_new]) {
-		insn_buf[0] = BPF_ST_MEM(BPF_W, BPF_REG_1, 0, -1);
-		insn_buf[1] = BPF_ST_MEM(BPF_W, BPF_REG_1, 4, BPF_MAX_LOOPS);
-		insn_buf[2] = BPF_MOV64_IMM(BPF_REG_0, 0);
-		*cnt = 3;
-	} else if (desc->func_id == special_kfunc_list[KF_bpf_iter_loop_destroy]) {
-		insn_buf[0] = BPF_ST_MEM(BPF_DW, BPF_REG_1, 0, 0);
+		insn_buf[0] = BPF_JMP_IMM(BPF_JA, 0, 0, 0);
 		*cnt = 1;
-	} else if (desc->func_id == special_kfunc_list[KF_bpf_iter_num_next] ||
-		   desc->func_id == special_kfunc_list[KF_bpf_iter_loop_next]) {
+	} else if (desc->func_id == special_kfunc_list[KF_bpf_iter_loop_next]) {
+		insn_buf[0] = BPF_LD_IMM64(BPF_REG_0, (long)env->prog->aux);
+		insn_buf[1] = BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_0, offsetof(struct bpf_prog_aux, loop_allowed));
+		*cnt = 2;
+	} else if (desc->func_id == special_kfunc_list[KF_bpf_iter_loop_destroy]) {
+		insn_buf[0] = BPF_JMP_IMM(BPF_JA, 0, 0, 0);
+		*cnt = 1;
+	} else if (desc->func_id == special_kfunc_list[KF_bpf_iter_num_next]) {
 		// r0 = s->cur
 		insn_buf[0] = BPF_LDX_MEM(BPF_W, BPF_REG_0, BPF_REG_1, 0);
 		// r2 = s->end

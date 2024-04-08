@@ -1484,6 +1484,8 @@ struct bpf_prog_aux {
 	struct bpf_trampoline *dst_trampoline;
 	enum bpf_prog_type saved_dst_prog_type;
 	enum bpf_attach_type saved_dst_attach_type;
+	u64 loop_allowed;
+	u32 loop_value;
 	bool verifier_zext; /* Zero extensions has been inserted by verifier. */
 	bool dev_bound; /* Program is bound to the netdev. */
 	bool offload_requested; /* Program is bound and offloaded to the netdev. */
