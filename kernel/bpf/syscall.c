@@ -6022,7 +6022,7 @@ static struct ctl_table bpf_syscall_table[] = {
 		.mode		= 0644,
 		.proc_handler	= bpf_heap_sfi_handler,
 		.extra1		= SYSCTL_ZERO,
-		.extra2		= SYSCTL_THREE,
+		.extra2		= SYSCTL_FOUR,
 	},
 	{ }
 };

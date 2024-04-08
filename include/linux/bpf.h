@@ -599,14 +599,18 @@ bool bpf_map_meta_equal(const struct bpf_map *meta0,
 extern const struct bpf_map_ops bpf_map_offload_ops;
 
 enum bpf_heap_sfi_mode {
-	BPF_HEAP_SFI_NONE, /* No safety instrumentation. */
-	BPF_HEAP_SFI_SHFT, /* Use shift instruction + AND to steer pointer. */
 	BPF_HEAP_SFI_BITM, /* Use OR + AND to steer pointer. */
 	BPF_HEAP_SFI_BASE, /* Use OR to obtain offset, and access with base + reg encoding. */
 	/* Same as above, but with no instrumentation for read-only pointers. */
 	BPF_HEAP_SFI_SHFT_PERF,
 	BPF_HEAP_SFI_BITM_PERF,
 	BPF_HEAP_SFI_BASE_PERF,
+	// We don't test these, so move them below, sysctl values go from 0 to
+	// 4, and none is hard to test as it's wild west, shft is sort of
+	// covered by shft perf (ideally we'd have 0 to 5 as sysctl values, but
+	// oh well).
+	BPF_HEAP_SFI_NONE, /* No safety instrumentation. */
+	BPF_HEAP_SFI_SHFT, /* Use shift instruction + AND to steer pointer. */
 };
 
 /* bpf_type_flag contains a set of flags that are applicable to the values of
