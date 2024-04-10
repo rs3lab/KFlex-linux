@@ -2683,6 +2683,90 @@ __bpf_kfunc bool bpf_ffkx_memequal(void *a__ign, void *b__ign, u64 size) {
 	return !memcmp(a__ign, b__ign, size);
 }
 
+// Benchmarking function
+
+struct ffkx_linked_list_elem {
+	struct list_head node;
+	u64 owner;
+	char buf[];
+};
+
+__bpf_kfunc int bpf_bench_linked_list_update(struct ffkx_linked_list_elem *elem__ign, struct list_head *head__ign, void *key__ign, void *value__ign, u64 key_value_size) {
+	u32 key_size = key_value_size >> 32;
+	u32 value_size = ((key_value_size << 32) >> 32);
+	memcpy(elem__ign->buf, key__ign, key_size);
+	memcpy(elem__ign->buf + key_size, value__ign, value_size);
+	INIT_LIST_HEAD(&elem__ign->node);
+	list_add(&elem__ign->node, head__ign);
+	return 0;
+}
+
+__bpf_kfunc int bpf_bench_linked_list_lookup(struct list_head *head__ign, void *key__ign, u32 key_size) {
+	struct ffkx_linked_list_elem *elem, *n;
+
+	list_for_each_entry_safe(elem, n, head__ign, node) {
+		if (!memcmp(elem->buf, key__ign, key_size)) {
+			return 0;
+		}
+	}
+	return ENOENT;
+}
+
+__bpf_kfunc int bpf_bench_linked_list_delete(struct list_head *head__ign, void *key__ign, u32 key_size) {
+	struct ffkx_linked_list_elem *elem, *n;
+
+	list_for_each_entry_safe(elem, n, head__ign, node) {
+		if (!memcmp(elem->buf, key__ign, key_size)) {
+			list_del_init(&elem->node);
+			INIT_LIST_HEAD(&elem->node);
+			return 0;
+		}
+	}
+	return ENOENT;
+}
+
+__bpf_kfunc int bpf_bench_graph_linked_list_update(struct ffkx_linked_list_elem *elem__ign, struct list_head *head__ign, void *key__ign, void *value__ign, u64 key_value_size) {
+	u32 key_size = key_value_size >> 32;
+	u32 value_size = ((key_value_size << 32) >> 32);
+	memcpy(elem__ign->buf, key__ign, key_size);
+	memcpy(elem__ign->buf + key_size, value__ign, value_size);
+
+	if (cmpxchg(&elem__ign->owner, 0, (u64)BPF_PTR_POISON)) {
+		return EFAULT;
+	}
+	INIT_LIST_HEAD(&elem__ign->node);
+	list_add(&elem__ign->node, head__ign);
+	WRITE_ONCE(elem__ign->owner, (u64)head__ign);
+	return 0;
+}
+
+__bpf_kfunc int bpf_bench_graph_linked_list_lookup(struct list_head *head__ign, void *key__ign, u32 key_size) {
+	struct ffkx_linked_list_elem *elem, *n;
+
+	list_for_each_entry_safe(elem, n, head__ign, node) {
+		if (!memcmp(elem->buf, key__ign, key_size)) {
+			return 0;
+		}
+	}
+	return ENOENT;
+}
+
+__bpf_kfunc int bpf_bench_graph_linked_list_delete(struct list_head *head__ign, void *key__ign, u32 key_size) {
+	struct ffkx_linked_list_elem *elem, *n;
+
+	list_for_each_entry_safe(elem, n, head__ign, node) {
+		if (!memcmp(elem->buf, key__ign, key_size)) {
+			if (WARN_ON_ONCE(READ_ONCE(elem->owner) != (u64)head__ign))
+				return EINVAL;
+			list_del_init(&elem->node);
+			INIT_LIST_HEAD(&elem->node);
+			WRITE_ONCE(elem->owner, 0);
+			return 0;
+		}
+	}
+	return ENOENT;
+}
+
 __bpf_kfunc_end_defs();
 
 BTF_KFUNCS_START(generic_btf_ids)
@@ -2721,6 +2805,13 @@ BTF_ID_FLAGS(func, bpf_preempt_disable)
 BTF_ID_FLAGS(func, bpf_preempt_enable)
 BTF_ID_FLAGS(func, bpf_ffkx_memcpy)
 BTF_ID_FLAGS(func, bpf_ffkx_memequal)
+// BPF Bench
+BTF_ID_FLAGS(func, bpf_bench_linked_list_update)
+BTF_ID_FLAGS(func, bpf_bench_linked_list_lookup)
+BTF_ID_FLAGS(func, bpf_bench_linked_list_delete)
+BTF_ID_FLAGS(func, bpf_bench_graph_linked_list_update)
+BTF_ID_FLAGS(func, bpf_bench_graph_linked_list_lookup)
+BTF_ID_FLAGS(func, bpf_bench_graph_linked_list_delete)
 BTF_KFUNCS_END(generic_btf_ids)
 
 static const struct btf_kfunc_id_set generic_kfunc_set = {
