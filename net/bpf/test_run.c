@@ -961,6 +961,41 @@ static struct proto bpf_dummy_proto = {
 	.obj_size = sizeof(struct sock),
 };
 
+struct bpf_test_run_cpu_info {
+	struct bpf_prog *prog;
+	void *ctx;
+	u32 repeat;
+	u32 *retval;
+	u32 *duration;
+	bool xdp;
+	int ret;
+};
+
+static void __bpf_test_run_cpu(void *info) {
+	struct bpf_test_run_cpu_info *f = info;
+
+	f->ret = bpf_test_run(f->prog, f->ctx, f->repeat, f->retval, f->duration, f->xdp);
+}
+
+static int bpf_test_run_cpu(struct bpf_prog *prog, void *skb, u32 repeat, u32 *retval, u32 *duration, bool xdp, int cpu) {
+	struct bpf_test_run_cpu_info info = {prog, skb, repeat, retval, duration, xdp, -EINVAL};
+	int current_cpu = get_cpu();
+	int ret;
+	if (cpu != current_cpu) {
+		// FIXME: check cpu >nr_ids and cpu_online
+		ret = smp_call_function_single(cpu, __bpf_test_run_cpu, &info, 1);
+		if (ret < 0)
+			return ret;
+		if (info.ret < 0)
+			return info.ret;
+		ret = info.ret;
+	} else {
+		ret = bpf_test_run(prog, skb, repeat, retval, duration, xdp);
+	}
+	put_cpu();
+	return ret;
+}
+
 int bpf_prog_test_run_skb(struct bpf_prog *prog, const union bpf_attr *kattr,
 			  union bpf_attr __user *uattr)
 {
@@ -977,8 +1012,16 @@ int bpf_prog_test_run_skb(struct bpf_prog *prog, const union bpf_attr *kattr,
 	void *data;
 	int ret;
 
-	if (kattr->test.flags || kattr->test.cpu || kattr->test.batch_size)
+	if (kattr->test.flags) {
+		if (kattr->test.flags != BPF_F_TEST_RUN_ON_CPU) {
+			return -EINVAL;
+		}
+	} else if (kattr->test.cpu) {
 		return -EINVAL;
+	}
+	if (kattr->test.batch_size) {
+		return -EINVAL;
+	}
 
 	data = bpf_test_init(kattr, kattr->test.data_size_in,
 			     size, NET_SKB_PAD + NET_IP_ALIGN,
@@ -1063,7 +1106,10 @@ int bpf_prog_test_run_skb(struct bpf_prog *prog, const union bpf_attr *kattr,
 	ret = convert___skb_to_skb(skb, ctx);
 	if (ret)
 		goto out;
-	ret = bpf_test_run(prog, skb, repeat, &retval, &duration, false);
+	if (kattr->test.flags == BPF_F_TEST_RUN_ON_CPU)
+		ret = bpf_test_run_cpu(prog, skb, repeat, &retval, &duration, false, kattr->test.cpu);
+	else
+		ret = bpf_test_run(prog, skb, repeat, &retval, &duration, false);
 	if (ret)
 		goto out;
 	if (!is_l2) {
