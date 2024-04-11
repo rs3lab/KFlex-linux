@@ -18613,20 +18613,31 @@ static int save_aux_ptr_type(struct bpf_verifier_env *env, enum bpf_reg_type typ
 		 * src_reg == stack|map in some other branch.
 		 * Reject it.
 		 */
-		if (allow_trust_missmatch &&
-		    base_type(type) == PTR_TO_BTF_ID &&
-		    base_type(*prev_type) == PTR_TO_BTF_ID &&
-		    // MEM_HEAP shouldn't be involved in mismatch
-		    !((type | *prev_type) & (MEM_HEAP | MEM_HEAP_UNTRUSTED))) {
-			/*
-			 * Have to support a use case when one path through
-			 * the program yields TRUSTED pointer while another
-			 * is UNTRUSTED. Fallback to UNTRUSTED to generate
-			 * BPF_PROBE_MEM/BPF_PROBE_MEMSX.
-			 */
-			*prev_type = PTR_TO_BTF_ID | PTR_UNTRUSTED;
+		if (type_is_heap(type) && type_is_heap(*prev_type)) {
+			// We allow two different types of heap pointers
+			// to be accessed at the same insn. If a
+			// different type was seen (like untrusted), we
+			// will emit a guard instruction before the
+			// access anyway. A guard instruction is
+			// harmless for correct pointers.
+
+			// Don't check allow_trust_mismatch, because we can
+			// handle both loads and stores of trusted/untrusted
+			// cases.
+		} else if (allow_trust_missmatch) {
+			if (base_type(type) == PTR_TO_BTF_ID &&
+			    base_type(*prev_type) == PTR_TO_BTF_ID) {
+				/*
+				 * Have to support a use case when one path through
+				 * the program yields TRUSTED pointer while another
+				 * is UNTRUSTED. Fallback to UNTRUSTED to generate
+				 * BPF_PROBE_MEM/BPF_PROBE_MEMSX.
+				 */
+				*prev_type = PTR_TO_BTF_ID | PTR_UNTRUSTED;
+			}
 		} else {
-			verbose(env, "same insn cannot be used with different pointers\n");
+			verbose(env,
+				"same insn cannot be used with different pointers\n");
 			return -EINVAL;
 		}
 	}
