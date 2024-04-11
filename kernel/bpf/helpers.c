@@ -2767,6 +2767,71 @@ __bpf_kfunc int bpf_bench_graph_linked_list_delete(struct list_head *head__ign, 
 	return ENOENT;
 }
 
+static __always_inline int bpf_bench_rbtree_cmp(struct rb_node *node, struct rb_node *parent, u32 key_size) {
+	// We want the less operator to be dependent on input size in terms of
+	// complexity. Let's memequal before we return a result.
+	bool equal = !memcmp((void *)(node + 1), (void *)(parent + 1), key_size);
+	bool less = *(u64 *)(node + 1) < *(u64 *)(parent + 1);
+	return equal ? 0 : (less ? -1 : 1);
+}
+
+static __always_inline int bpf_bench_rbtree_key_cmp(struct rb_node *node, void *key, u32 key_size) {
+	// We want the less operator to be dependent on input size in terms of
+	// complexity. Let's memequal before we return a result.
+	bool equal = !memcmp((void *)(node + 1), key, key_size);
+	bool less = *(u64 *)(node + 1) < *(u64 *)key;
+	return equal ? 0 : (less ? -1 : 1);
+}
+
+__bpf_kfunc int bpf_bench_rbtree_update(struct rb_root_cached *root__ign, struct rb_node *node__ign, u32 key_size) {
+	struct rb_node **link = &root__ign->rb_root.rb_node;
+	struct rb_node *parent = NULL, *n = node__ign;
+	bool leftmost = true;
+
+	RB_CLEAR_NODE(n);
+	while (*link) {
+		parent = *link;
+		if (bpf_bench_rbtree_cmp(n, parent, key_size) < 0) {
+			link = &parent->rb_left;
+		} else {
+			link = &parent->rb_right;
+			leftmost = false;
+		}
+	}
+
+	rb_link_node(n, parent, link);
+	rb_insert_color_cached(n, root__ign, leftmost);
+	return 0;
+}
+
+__bpf_kfunc u64 bpf_bench_rbtree_lookup(struct rb_root_cached *root__ign, void *key__ign, u32 key_size) {
+	struct rb_node *node = root__ign->rb_root.rb_node;
+
+	while (node) {
+		int cmp = bpf_bench_rbtree_key_cmp(node, key__ign, key_size);
+
+		if (cmp < 0) // less
+			node = node->rb_left;
+		else if (cmp > 0) // greater
+			node = node->rb_right;
+		else // equal
+			return (u64)node;
+	}
+	return ENOENT;
+}
+
+__bpf_kfunc int bpf_bench_rbtree_delete(struct rb_root_cached *root__ign, void *key__ign, u32 key_size) {
+	struct rb_node *n;
+
+	n = (struct rb_node *)bpf_bench_rbtree_lookup(root__ign, key__ign, key_size);
+	if ((u64)n == ENOENT) {
+		return ENOENT;
+	}
+	rb_erase_cached(n, root__ign);
+	RB_CLEAR_NODE(n);
+	return 0;
+}
+
 __bpf_kfunc_end_defs();
 
 BTF_KFUNCS_START(generic_btf_ids)
@@ -2812,6 +2877,9 @@ BTF_ID_FLAGS(func, bpf_bench_linked_list_delete)
 BTF_ID_FLAGS(func, bpf_bench_graph_linked_list_update)
 BTF_ID_FLAGS(func, bpf_bench_graph_linked_list_lookup)
 BTF_ID_FLAGS(func, bpf_bench_graph_linked_list_delete)
+BTF_ID_FLAGS(func, bpf_bench_rbtree_update)
+BTF_ID_FLAGS(func, bpf_bench_rbtree_lookup)
+BTF_ID_FLAGS(func, bpf_bench_rbtree_delete)
 BTF_KFUNCS_END(generic_btf_ids)
 
 static const struct btf_kfunc_id_set generic_kfunc_set = {
