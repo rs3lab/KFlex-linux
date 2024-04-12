@@ -13802,8 +13802,15 @@ static int adjust_ptr_min_max_vals(struct bpf_verifier_env *env,
 	dst_reg->id = ptr_reg->id;
 
 	if (!check_reg_sane_offset(env, off_reg, ptr_reg->type) ||
-	    !check_reg_sane_offset(env, ptr_reg, ptr_reg->type))
-		return -EINVAL;
+	    !check_reg_sane_offset(env, ptr_reg, ptr_reg->type)) {
+		if (!type_is_heap(ptr_reg->type))
+			return -EINVAL;
+		// Relax for heap pointers, we only allow ADD or SUB, so don't
+		// worry about creating destination as a pointer type.
+		mark_btf_ld_reg(env, regs, dst, PTR_TO_BTF_ID, ptr_reg->btf, ptr_reg->btf_id, MEM_HEAP_UNTRUSTED);
+		dst_reg->heap_off = 0;
+		return 0;
+	}
 
 	/* pointer types do not carry 32-bit bounds at the moment. */
 	__mark_reg32_unbounded(dst_reg);
