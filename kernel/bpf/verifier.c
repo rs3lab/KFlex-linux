@@ -6585,8 +6585,12 @@ static int check_ptr_to_heap_access(struct bpf_verifier_env *env,
 	// unknown.
 	// TODO(kkd): Optimize for reg->var_off.value?
 	if (!tnum_is_const(reg->var_off) || reg->var_off.value) {
-		verbose(env, "variable offset access to heap pointer not permitted, using cast instructions to guard\n");
-		return -EINVAL;
+		// FIXME: Should we allow and anticipate ptr type in case of
+		// flex array scenario? For now allow void and mark untrusted.
+		if (!btf_type_is_void(t)) {
+			verbose(env, "variable offset access to heap pointer not permitted, using cast instructions to guard\n");
+			return -EINVAL;
+		}
 		if (!WARN_ON_ONCE(reg->type != (PTR_TO_BTF_ID | MEM_HEAP_UNTRUSTED))) {
 			reg->type &= ~MEM_HEAP;
 			reg->type |= MEM_HEAP_UNTRUSTED;
