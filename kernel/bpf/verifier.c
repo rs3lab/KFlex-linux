@@ -6510,8 +6510,14 @@ static int check_ptr_to_heap_access(struct bpf_verifier_env *env,
 
 	// Sanitize before access
 	if (reg->type & MEM_HEAP_UNTRUSTED) {
-		// Don't insert guard in performance mode, as reads are
-		// harmless and we ensure abort on fault.
+		// FIXME: TODO(kkd): Don't insert guard in performance mode, as
+		// reads are harmless and we ensure abort on fault. For writes,
+		// ensure that a guard is emitted now.
+		//
+		// Note that for BASE_PERF, it is possible that the value has
+		// been made bad by unbounded pointer arithmetic. However, we
+		// still don't insert a guard on read, as the actual dereference
+		// will be for base + reg.
 		if (atype == BPF_WRITE || (atype == BPF_READ &&
 		    (heap_sfi_mode != BPF_HEAP_SFI_SHFT_PERF &&
 		     heap_sfi_mode != BPF_HEAP_SFI_BITM_PERF &&
@@ -6549,10 +6555,19 @@ static int check_ptr_to_heap_access(struct bpf_verifier_env *env,
 			// Guard dst but only if translation is needed,
 			// otherwise we can mark as untrusted and emit guards on
 			// first store. Loads can be untranslated and safe.
+			//
 			// We also need a guard (not translation) for base SFI,
-			// as upper bits need to be eliminated. u2k trans is
-			// already a single AND for this mode, so just rely on
-			// it.
+			// as upper bits need to be eliminated for pointer
+			// "value" to be correct. For other SFI modes, if the
+			// pointer value is correct, the reg holds complete
+			// value and is directly deref'd. In base SFI, the reg's
+			// correct value is the unmasked bits instead. If we
+			// don't guard, next r12 + reg access will be bad. We
+			// need to give the user the right value when forming a
+			// pointer.
+			//
+			// u2k trans is already a single AND for this mode, so
+			// just rely on it.
 			if ((heap->map_flags & BPF_F_HEAP_TRANS) ||
 			    (heap_sfi_mode == BPF_HEAP_SFI_BASE ||
 			     heap_sfi_mode == BPF_HEAP_SFI_BASE_PERF)) {
