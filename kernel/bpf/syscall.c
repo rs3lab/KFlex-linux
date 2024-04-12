@@ -60,7 +60,7 @@ static DEFINE_SPINLOCK(link_idr_lock);
 
 int sysctl_unprivileged_bpf_disabled __read_mostly =
 	IS_BUILTIN(CONFIG_BPF_UNPRIV_DEFAULT_OFF) ? 2 : 0;
-int sysctl_bpf_heap_sfi_mode __read_mostly = BPF_HEAP_SFI_BASE_PERF;
+int sysctl_bpf_heap_sfi_mode __read_mostly = BPF_HEAP_SFI_BASE;
 
 static const struct bpf_map_ops * const bpf_map_types[] = {
 #define BPF_PROG_TYPE(_id, _name, prog_ctx_type, kern_ctx_type)

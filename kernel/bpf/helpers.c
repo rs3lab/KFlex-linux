@@ -2775,11 +2775,11 @@ static __always_inline int bpf_bench_rbtree_cmp(struct rb_node *node, struct rb_
 	return equal ? 0 : (less ? -1 : 1);
 }
 
-static __always_inline int bpf_bench_rbtree_key_cmp(struct rb_node *node, void *key, u32 key_size) {
+static __always_inline int bpf_bench_rbtree_key_cmp(void *key, struct rb_node *node, u32 key_size) {
 	// We want the less operator to be dependent on input size in terms of
 	// complexity. Let's memequal before we return a result.
-	bool equal = !memcmp((void *)(node + 1), key, key_size);
-	bool less = *(u64 *)(node + 1) < *(u64 *)key;
+	bool equal = !memcmp(key, (void *)(node + 1), key_size);
+	bool less = *(u64 *)key < *(u64 *)(node + 1);
 	return equal ? 0 : (less ? -1 : 1);
 }
 
@@ -2789,6 +2789,7 @@ __bpf_kfunc int bpf_bench_rbtree_update(struct rb_root_cached *root__ign, struct
 	bool leftmost = true;
 
 	RB_CLEAR_NODE(n);
+
 	while (*link) {
 		parent = *link;
 		if (bpf_bench_rbtree_cmp(n, parent, key_size) < 0) {
@@ -2808,7 +2809,7 @@ __bpf_kfunc u64 bpf_bench_rbtree_lookup(struct rb_root_cached *root__ign, void *
 	struct rb_node *node = root__ign->rb_root.rb_node;
 
 	while (node) {
-		int cmp = bpf_bench_rbtree_key_cmp(node, key__ign, key_size);
+		int cmp = bpf_bench_rbtree_key_cmp(key__ign, node, key_size);
 
 		if (cmp < 0) // less
 			node = node->rb_left;
