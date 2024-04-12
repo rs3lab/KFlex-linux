@@ -2833,6 +2833,112 @@ __bpf_kfunc int bpf_bench_rbtree_delete(struct rb_root_cached *root__ign, void *
 	return 0;
 }
 
+// Skiplist
+
+static __always_inline int bpf_bench_skiplist_cmp(void *node_key, void *key, u32 key_size) {
+  bool equal = !memcmp(node_key, key, key_size);
+  bool less = (*(u64 *)node_key) < (*(u64 *)key);
+  return equal ? 0 : (less ? -1 : 1);
+}
+#define MAX_SKIPLIST_HEIGHT 32
+
+struct ffkx_skiplist_elem {
+	u32 height;
+	u32 key_size;
+	struct ffkx_skiplist_elem *next[MAX_SKIPLIST_HEIGHT];
+	char buf[];
+};
+
+__bpf_kfunc int bpf_bench_skiplist_update(struct ffkx_skiplist_elem *head__ign, struct ffkx_skiplist_elem *node__ign) {
+	struct ffkx_skiplist_elem *prev[MAX_SKIPLIST_HEIGHT];
+	struct ffkx_skiplist_elem *head = head__ign;
+	struct ffkx_skiplist_elem *curr = head;
+	int level = head->height - 1;
+
+	while (curr && level >= 0) {
+		prev[level] = curr;
+		if (curr->next[level] == NULL) {
+			level--;
+		} else {
+			int cmp = bpf_bench_skiplist_cmp(curr->next[level]->buf, node__ign->buf, node__ign->key_size);
+			if (cmp == 0) {
+				// Consume value
+				return 0;
+			} else if (cmp > 0) {
+				--level;
+			} else {
+				curr = curr->next[level];
+			}
+		}
+	}
+
+	// Height key value already set for node
+	for (int i = MAX_SKIPLIST_HEIGHT - 1; i > node__ign->height; --i) {
+		node__ign->next[i] = NULL;
+	}
+
+	for (int i = node__ign->height - 1; i >= 0; --i) {
+		node__ign->next[i] = prev[i]->next[i];
+		prev[i]->next[i] = node__ign;
+	}
+	return 0;
+}
+
+__bpf_kfunc int bpf_bench_skiplist_lookup(struct ffkx_skiplist_elem *head__ign, void *key__ign, u32 key_size) {
+	struct ffkx_skiplist_elem *head = head__ign;
+	struct ffkx_skiplist_elem *curr = head;
+	int level = head->height - 1;
+	void *key = key__ign;
+
+	while (curr && level >= 0) {
+		if (curr->next[level] == NULL) {
+			level--;
+		} else {
+			int cmp = bpf_bench_skiplist_cmp(curr->next[level]->buf, key, key_size);
+			if (cmp == 0) {
+				return 0;
+			} else if (cmp > 0) {
+				level--;
+			} else {
+				curr = curr->next[level];
+			}
+		}
+	}
+	return ENOENT;
+}
+
+__bpf_kfunc int bpf_bench_skiplist_delete(struct ffkx_skiplist_elem *head__ign, void *key__ign, u32 key_size) {
+	struct ffkx_skiplist_elem *prev[MAX_SKIPLIST_HEIGHT];
+	struct ffkx_skiplist_elem *head = head__ign;
+	struct ffkx_skiplist_elem *curr = head;
+	int level = head->height - 1;
+	void *key = key__ign;
+
+	int cmp = 1;
+	while (curr && level >= 0) {
+		prev[level] = curr;
+		if (curr->next[level] == NULL) {
+			level--;
+		} else {
+			cmp = bpf_bench_skiplist_cmp(curr->next[level]->buf, key, key_size);
+			if (cmp >= 0) {
+				level--;
+			} else {
+				curr = curr->next[level];
+			}
+		}
+	}
+
+	if (!curr || cmp) {
+		return ENOENT;
+	}
+	curr = curr->next[0];
+	for (int i = curr->height - 1; i >= 0; i--) {
+		prev[i]->next[i] = curr->next[i];
+	}
+	return 0;
+}
+
 __bpf_kfunc_end_defs();
 
 BTF_KFUNCS_START(generic_btf_ids)
@@ -2881,6 +2987,9 @@ BTF_ID_FLAGS(func, bpf_bench_graph_linked_list_delete)
 BTF_ID_FLAGS(func, bpf_bench_rbtree_update)
 BTF_ID_FLAGS(func, bpf_bench_rbtree_lookup)
 BTF_ID_FLAGS(func, bpf_bench_rbtree_delete)
+BTF_ID_FLAGS(func, bpf_bench_skiplist_update)
+BTF_ID_FLAGS(func, bpf_bench_skiplist_lookup)
+BTF_ID_FLAGS(func, bpf_bench_skiplist_delete)
 BTF_KFUNCS_END(generic_btf_ids)
 
 static const struct btf_kfunc_id_set generic_kfunc_set = {
