@@ -2862,8 +2862,10 @@ __bpf_kfunc int bpf_bench_skiplist_update(struct ffkx_skiplist_elem *head__ign, 
 		} else {
 			int cmp = bpf_bench_skiplist_cmp(curr->next[level]->buf, node__ign->buf, node__ign->key_size);
 			if (cmp == 0) {
-				// Consume value
-				return 0;
+				// Treat as value > so that deletes can match,
+				// otherwise typically we just return 0 here
+				// FIXME:return 0;
+				--level;
 			} else if (cmp > 0) {
 				--level;
 			} else {
@@ -2929,14 +2931,13 @@ __bpf_kfunc int bpf_bench_skiplist_delete(struct ffkx_skiplist_elem *head__ign, 
 		}
 	}
 
-	if (!curr || cmp) {
-		return ENOENT;
+	if (curr && !cmp) {
+		struct ffkx_skiplist_elem *del = curr->next[0];
+		for (int i = del->height - 1; i >= 0; i--)
+			prev[i]->next[i] = del->next[i];
+		return 0;
 	}
-	curr = curr->next[0];
-	for (int i = curr->height - 1; i >= 0; i--) {
-		prev[i]->next[i] = curr->next[i];
-	}
-	return 0;
+	return ENOENT;
 }
 
 __bpf_kfunc_end_defs();
@@ -2971,10 +2972,6 @@ BTF_ID_FLAGS(func, bpf_task_get_cgroup1, KF_ACQUIRE | KF_RCU | KF_RET_NULL)
 BTF_ID_FLAGS(func, bpf_task_from_pid, KF_ACQUIRE | KF_RET_NULL)
 BTF_ID_FLAGS(func, bpf_throw)
 BTF_ID_FLAGS(func, bpf_rdonly_obj_cast)
-BTF_ID_FLAGS(func, bpf_preempt_disable)
-BTF_ID_FLAGS(func, bpf_preempt_enable)
-BTF_ID_FLAGS(func, bpf_ffkx_memcpy)
-BTF_ID_FLAGS(func, bpf_ffkx_memequal)
 // BPF Bench
 BTF_ID_FLAGS(func, bpf_bench_linked_list_update)
 BTF_ID_FLAGS(func, bpf_bench_linked_list_lookup)
@@ -3052,6 +3049,10 @@ BTF_ID_FLAGS(func, bpf_modify_return_test_tp)
 BTF_ID_FLAGS(func, bpf_throw)
 BTF_ID_FLAGS(func, bpf_register_heap)
 BTF_ID_FLAGS(func, bpf_scalar_cast)
+BTF_ID_FLAGS(func, bpf_preempt_disable)
+BTF_ID_FLAGS(func, bpf_preempt_enable)
+BTF_ID_FLAGS(func, bpf_ffkx_memcpy)
+BTF_ID_FLAGS(func, bpf_ffkx_memequal)
 BTF_KFUNCS_END(common_btf_ids)
 
 static const struct btf_kfunc_id_set common_kfunc_set = {
