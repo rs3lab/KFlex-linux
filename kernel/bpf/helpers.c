@@ -2683,6 +2683,10 @@ __bpf_kfunc bool bpf_ffkx_memequal(void *a__ign, void *b__ign, u64 size) {
 	return !memcmp(a__ign, b__ign, size);
 }
 
+__bpf_kfunc bool bpf_ffkx_memcmp(void *a__ign, void *b__ign, u64 size) {
+	return memcmp(a__ign, b__ign, size);
+}
+
 // Benchmarking function
 
 struct ffkx_linked_list_elem {
@@ -3053,6 +3057,7 @@ BTF_ID_FLAGS(func, bpf_preempt_disable)
 BTF_ID_FLAGS(func, bpf_preempt_enable)
 BTF_ID_FLAGS(func, bpf_ffkx_memcpy)
 BTF_ID_FLAGS(func, bpf_ffkx_memequal)
+BTF_ID_FLAGS(func, bpf_ffkx_memcmp)
 BTF_KFUNCS_END(common_btf_ids)
 
 static const struct btf_kfunc_id_set common_kfunc_set = {
