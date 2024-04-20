@@ -705,6 +705,8 @@ struct bpf_verifier_env {
 	u32 hidden_subprog_cnt;		/* number of hidden subprogs */
 	int exception_callback_subprog;
 	int bpf_throw_tramp_subprog;
+	int range_analysis_heap_call;
+	int range_analysis_heap_elide;
 	bool explore_alu_limits;
 	bool allow_ptr_leaks;
 	/* Allow access to uninitialized stack memory. Writes with fixed offset are

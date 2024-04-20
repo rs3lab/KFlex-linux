@@ -13844,6 +13844,7 @@ static int adjust_ptr_min_max_vals(struct bpf_verifier_env *env,
 
 			// Checks on pointer increment for heaps
 			if (type_is_heap(ptr_reg->type)) {
+				env->range_analysis_heap_call++;
 				int type = ptr_reg->type;
 				s64 heap_off = ptr_reg->heap_off;
 
@@ -13859,6 +13860,8 @@ static int adjust_ptr_min_max_vals(struct bpf_verifier_env *env,
 					// All ok otherwise, just add to
 					// heap_off. Doesn't overflow.
 					heap_off += smin_val;
+					// Increment elide counter
+					env->range_analysis_heap_elide++;
 				} else {
 					// Overflow, guard!
 					type = PTR_TO_BTF_ID | MEM_HEAP_UNTRUSTED;
@@ -13905,6 +13908,7 @@ static int adjust_ptr_min_max_vals(struct bpf_verifier_env *env,
 
 		// Variable offset added, I DON'T KNOW WHERE THE FUCK I AM NOW
 		if (type_is_heap(ptr_reg->type)) {
+			env->range_analysis_heap_call++;
 			dst_reg->type = PTR_TO_BTF_ID | MEM_HEAP_UNTRUSTED;
 			dst_reg->heap_off = 0;
 		}
@@ -13939,6 +13943,7 @@ static int adjust_ptr_min_max_vals(struct bpf_verifier_env *env,
 
 			// Checks on pointer decrement for heaps
 			if (type_is_heap(ptr_reg->type)) {
+				env->range_analysis_heap_call++;
 				int type = ptr_reg->type;
 				s64 heap_off = ptr_reg->heap_off;
 
@@ -13954,6 +13959,7 @@ static int adjust_ptr_min_max_vals(struct bpf_verifier_env *env,
 					// All ok otherwise, just add to
 					// heap_off. Doesn't overflow.
 					heap_off -= smin_val;
+					env->range_analysis_heap_elide++;
 				} else {
 					// Overflow, guard!
 					type = PTR_TO_BTF_ID | MEM_HEAP_UNTRUSTED;
@@ -13997,6 +14003,7 @@ static int adjust_ptr_min_max_vals(struct bpf_verifier_env *env,
 
 		// Variable offset added, I DON'T KNOW WHERE THE FUCK I AM NOW
 		if (type_is_heap(ptr_reg->type)) {
+			env->range_analysis_heap_call++;
 			dst_reg->type = PTR_TO_BTF_ID | MEM_HEAP_UNTRUSTED;
 			dst_reg->heap_off = 0;
 		}
@@ -22658,6 +22665,8 @@ int bpf_check(struct bpf_prog **prog, union bpf_attr *attr, bpfptr_t uattr, __u3
 	env->bpf_capable = is_priv = bpf_token_capable(env->prog->aux->token, CAP_BPF);
 	/* Set to an invalid value, since 0 is a valid subprog value. */
 	env->bpf_throw_tramp_subprog = -1;
+	env->range_analysis_heap_call = 0;
+	env->range_analysis_heap_elide = 0;
 
 	bpf_get_btf_vmlinux();
 
@@ -22740,6 +22749,8 @@ int bpf_check(struct bpf_prog **prog, union bpf_attr *attr, bpfptr_t uattr, __u3
 
 	ret = do_check_main(env);
 	ret = ret ?: do_check_subprogs(env);
+	printk("prog=%s range_analysis_call=%d elided=%d", env->prog->aux->name, env->range_analysis_heap_call,
+			env->range_analysis_heap_elide);
 
 	if (ret == 0 && bpf_prog_is_offloaded(env->prog->aux))
 		ret = bpf_prog_offload_finalize(env);
